@@ -73,15 +73,14 @@
     "computed_price_unit": "w",
     "computed_price_multiplier": 10000,
     "rounding": "floor_int",
-    "fallback_bid_price": 22223,
+    "fallback_bid_price": 30000,
+    "last_submitted_price": null,
     "min_useful_facts": 1
   },
   "automation": {
-    "tool_rounds": [
-      1,
-      2
-    ],
-    "default_map": "4",
+    "selected_mode": "express",
+    "tool_rounds": [],
+    "default_map": "1",
     "default_runs": 1,
     "unknown_escape_cooldown_seconds": 2.0,
     "post_confirm_escape_block_seconds": 30.0,
@@ -143,9 +142,15 @@
         }
       }
     },
-    "selected_map": "5",
+    "selected_map": "1",
     "selected_runs": 5,
-    "selected_risk": "激进"
+    "selected_risk": "avg_price",
+    "custom_risk_factor": 0.0,
+    "safe_guard_enabled": false,
+    "safe_guard_max_increase_ratio": 0.5,
+    "bid_cap_price": 0,
+    "sticky_increment_ratio": 0.03,
+    "express_total_multiplier": 1009.0
   },
   "timing": {
     "poll_seconds": 0.5,

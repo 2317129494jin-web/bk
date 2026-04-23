@@ -320,11 +320,19 @@ def green_white_total(data: dict) -> Optional[int]:
     green = as_non_neg_int(data.get("count_green"))
     white = as_non_neg_int(data.get("count_white"))
     direct = as_non_neg_int(data.get("wg_total"))
-    if green is not None or white is not None:
-        return (green or 0) + (white or 0)
+    if green is not None and white is not None:
+        return green + white
     if direct is not None:
         return direct
-    return direct
+    return None
+
+
+def green_white_lower_bound(data: dict) -> int:
+    green = as_non_neg_int(data.get("count_green"))
+    white = as_non_neg_int(data.get("count_white"))
+    green_min = as_non_neg_int(data.get("min_count_green")) or 0
+    white_min = as_non_neg_int(data.get("min_count_white")) or 0
+    return (green if green is not None else green_min) + (white if white is not None else white_min)
 
 
 def derive_total_grid_all(data: dict) -> Optional[int]:
@@ -346,9 +354,7 @@ def derive_total_grid_all(data: dict) -> Optional[int]:
 
 
 def green_white_min_total(data: dict) -> int:
-    green_min = as_non_neg_int(data.get("min_count_green")) or 0
-    white_min = as_non_neg_int(data.get("min_count_white")) or 0
-    return green_min + white_min
+    return green_white_lower_bound(data)
 
 
 def enumerate_green_white_splits(data: dict, wg_total: int) -> List[Tuple[int, int]]:

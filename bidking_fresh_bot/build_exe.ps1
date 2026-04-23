@@ -15,6 +15,7 @@ python -m PyInstaller `
   --onefile `
   --windowed `
   --name BidKingFreshBot_release `
+  --paths ".." `
   --hidden-import bidking_maa_test `
   --hidden-import bidking_maa_test.central_info_parser `
   --hidden-import bidking_maa_test.window_backend `

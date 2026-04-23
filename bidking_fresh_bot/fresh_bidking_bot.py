@@ -169,7 +169,7 @@ def default_advisor_input() -> dict[str, Any]:
     return {
         "round": 1,
         "my_role": "ahmad",
-        "total_all": 30,
+        "total_all": None,
         "avg_grid_all": None,
         "count_green": None,
         "count_white": None,
@@ -244,6 +244,34 @@ def merge_parsed_memory(current: dict[str, Any] | None, new_patch: dict[str, Any
         return json.loads(json.dumps(new_patch, ensure_ascii=False))
 
     merged = json.loads(json.dumps(current, ensure_ascii=False))
+    current_round = current.get("round")
+    new_round = new_patch.get("round")
+    same_round = (
+        current_round is not None and new_round is not None and int(current_round) == int(new_round)
+    )
+    sticky_scalar_fields = {
+        "total_all",
+        "victor_total_all",
+        "total_grid_all",
+        "wg_total",
+        "count_green",
+        "count_white",
+        "avg_grid_all",
+    }
+    sticky_constraint_fields = {"count", "grid", "avg"}
+    if not same_round:
+        for key in list(merged.keys()):
+            if key in ("constraints", "parsed_facts", "unparsed_lines", "round"):
+                continue
+            if key.startswith("avg_price_") or key.startswith("total_price_"):
+                merged.pop(key, None)
+                continue
+            if key in {
+                "observed_low_price",
+                "mixed_type_count",
+                "mixed_type_avg_grid_price",
+            }:
+                merged.pop(key, None)
     for key, value in new_patch.items():
         if key in ("parsed_facts", "unparsed_lines"):
             continue
@@ -252,10 +280,10 @@ def merge_parsed_memory(current: dict[str, Any] | None, new_patch: dict[str, Any
             for color, fields in value.items():
                 merged["constraints"].setdefault(color, {})
                 for field, field_value in fields.items():
-                    if field_value is not None:
+                    if field_value is not None and (same_round or field in sticky_constraint_fields):
                         merged["constraints"][color][field] = field_value
         else:
-            if value is not None:
+            if value is not None and (same_round or key in sticky_scalar_fields):
                 merged[key] = value
 
     merged_facts = list(current.get("parsed_facts") or [])
@@ -266,6 +294,17 @@ def merge_parsed_memory(current: dict[str, Any] | None, new_patch: dict[str, Any
     merged_unparsed.extend(new_patch.get("unparsed_lines") or [])
     merged["unparsed_lines"] = merged_unparsed
     return merged
+
+
+def sanitize_parsed_patch_for_memory(parsed_patch: dict[str, Any], round_no: int | None) -> dict[str, Any]:
+    patch = json.loads(json.dumps(parsed_patch or {}, ensure_ascii=False))
+    if patch.get("round") is not None and round_no is not None and int(patch.get("round")) != int(round_no):
+        return {"parsed_facts": [], "unparsed_lines": []}
+
+    current_round = int(round_no) if round_no is not None else None
+    if current_round is not None:
+        patch["round"] = current_round
+    return patch
 
 
 def build_advisor_input_from_patch(config: dict[str, Any], parsed_patch: dict[str, Any], round_no: int, price_config: dict[str, Any]) -> dict[str, Any]:
@@ -419,10 +458,22 @@ def observe_state_fast(config: dict[str, Any], config_path: Path, label: str) ->
     if bool(config.get("debug", {}).get("save_crops", True)):
         image_path = runs_dir / f"{timestamp}_{label}_full_window.png"
         frame.save(image_path)
-    ocr_image = ImageOps.grayscale(frame).convert("RGB")
-    text = rapidocr_once(ocr_image)
+    full_window_text = rapidocr_once(ImageOps.grayscale(frame).convert("RGB"))
     if bool(config.get("debug", {}).get("save_ocr_text", True)):
-        (runs_dir / f"{timestamp}_{label}_full_window.txt").write_text(text, encoding="utf-8")
+        (runs_dir / f"{timestamp}_{label}_full_window.txt").write_text(full_window_text, encoding="utf-8")
+
+    central_region = config.get("capture", {}).get("central_info_region")
+    if central_region:
+        central_box = scaled_region_box(central_region, config, frame.width, frame.height)
+        central_crop = frame.crop(central_box)
+        central_text = rapidocr_once(ImageOps.grayscale(central_crop).convert("RGB"))
+        if bool(config.get("debug", {}).get("save_crops", True)):
+            central_path = runs_dir / f"{timestamp}_{label}_central_info.png"
+            central_crop.save(central_path)
+        if bool(config.get("debug", {}).get("save_ocr_text", True)):
+            (runs_dir / f"{timestamp}_{label}_central_info.txt").write_text(central_text, encoding="utf-8")
+    else:
+        central_text = full_window_text
 
     home_bid_text = ""
     home_region = config.get("capture", {}).get("home_bid_button_region")
@@ -431,23 +482,24 @@ def observe_state_fast(config: dict[str, Any], config_path: Path, label: str) ->
         home_crop = frame.crop(box)
         home_bid_text = rapidocr_once(ImageOps.grayscale(home_crop).convert("RGB"))
 
-    capture = CaptureResult(text=text, image_path=image_path, parsed=parse_central_info(text))
+    capture = CaptureResult(text=central_text, image_path=image_path, parsed=parse_central_info(central_text))
+    round_no = parse_round_number(central_text) or parse_round_number(full_window_text)
     parsed_facts = capture.parsed.get("parsed_facts") or []
     any_signal = bool(
         parsed_facts
-        or parse_round_number(text) is not None
-        or has_end_prompt(text)
-        or has_reward_continue(text)
-        or has_auction_lobby(text)
+        or round_no is not None
+        or has_end_prompt(full_window_text)
+        or has_reward_continue(full_window_text)
+        or has_auction_lobby(full_window_text)
         or has_home_bid_button(home_bid_text)
     )
     return Observation(
         capture=capture,
-        end_text=text,
-        round_no=parse_round_number(text),
-        end_prompt=has_end_prompt(text),
-        reward_continue=has_reward_continue(text),
-        auction_lobby=has_auction_lobby(text),
+        end_text=full_window_text,
+        round_no=round_no,
+        end_prompt=has_end_prompt(full_window_text),
+        reward_continue=has_reward_continue(full_window_text),
+        auction_lobby=has_auction_lobby(full_window_text),
         home_bid_button=has_home_bid_button(home_bid_text),
         has_any_signal=any_signal,
     )
@@ -458,7 +510,7 @@ def observe_state(config: dict[str, Any], config_path: Path, label: str) -> Obse
 
 
 def apply_observation_memory(observation: Observation, knowledge_patch: dict[str, Any] | None) -> dict[str, Any] | None:
-    parsed = observation.capture.parsed or {}
+    parsed = sanitize_parsed_patch_for_memory(observation.capture.parsed or {}, observation.round_no)
     facts = parsed.get("parsed_facts") or []
     if not facts:
         return knowledge_patch
@@ -499,6 +551,16 @@ def save_round_debug_bundle(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def persist_last_submitted_price(config_path: Path, price: int | None) -> None:
+    try:
+        config = load_json(config_path)
+    except Exception:
+        return
+    config.setdefault("pricing", {})
+    config["pricing"]["last_submitted_price"] = None if price is None else int(price)
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def virtual_screen_rect() -> tuple[int, int, int, int]:
@@ -709,6 +771,20 @@ def choose_rounding(value: float, rounding: str) -> int:
     return int(math.floor(value))
 
 
+def parse_float_config(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def parse_int_config(value: Any, default: int) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
 def apply_observed_low_price_floor(result: dict[str, Any], price: int, rounding: str) -> tuple[int, str | None]:
     summary = (result or {}).get("summary") or {}
     observed_low_price = summary.get("observed_low_price")
@@ -729,12 +805,103 @@ def apply_observed_low_price_floor(result: dict[str, Any], price: int, rounding:
 def choose_bid_value_by_mode(config: dict[str, Any], result: dict[str, Any]) -> tuple[float | None, str]:
     selected_risk = str(config.get("automation", {}).get("selected_risk", "均衡")).strip()
     summary = (result or {}).get("summary") or {}
+    custom_factor = parse_float_config(config.get("automation", {}).get("custom_risk_factor"), 0.0)
     if selected_risk in ("保守", "conservative", "floor_price"):
         return summary.get("floor_price"), "保守=floor_price"
     if selected_risk in ("激进", "aggressive", "avg_price_plus_25"):
         avg_price = summary.get("avg_price")
         return (float(avg_price) * 1.25 if avg_price is not None else None), "激进=avg_price*1.25"
+    if selected_risk in ("自定义", "custom", "custom_factor"):
+        avg_price = summary.get("avg_price")
+        return (float(avg_price) * (1.0 + custom_factor) if avg_price is not None else None), f"自定义=avg_price*(1+{custom_factor:.4f})"
     return summary.get("avg_price"), "均衡=avg_price"
+
+
+def choose_express_bid_value(config: dict[str, Any], parsed_patch: dict[str, Any]) -> tuple[float | None, str]:
+    automation = config.get("automation", {})
+    total_all = parsed_patch.get("total_all")
+    if total_all is None:
+        total_all = parsed_patch.get("victor_total_all")
+    try:
+        total_all = int(total_all) if total_all is not None else None
+    except Exception:
+        total_all = None
+    if total_all is None or total_all <= 0:
+        return None, "快递跑刀缺少 total_all"
+    express_factor = parse_float_config(automation.get("express_total_multiplier"), 0.0)
+    final_price = choose_rounding(float(total_all) * float(express_factor), "floor_int")
+    return float(final_price), f"快递跑刀=total_all({total_all})*单件价({express_factor:.4f})"
+
+
+def apply_bid_cap(config: dict[str, Any], final_price: int, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    automation = config.get("automation", {})
+    bid_cap = max(0, parse_int_config(automation.get("bid_cap_price"), 0))
+    if bid_cap <= 0:
+        payload["bid_cap"] = {"enabled": False, "cap_price": 0, "applied": False}
+        return int(final_price), payload
+    capped = min(int(final_price), bid_cap)
+    payload["bid_cap"] = {
+        "enabled": True,
+        "cap_price": bid_cap,
+        "applied": capped != int(final_price),
+        "original_price": int(final_price),
+    }
+    return int(capped), payload
+
+
+def apply_safe_guard(config: dict[str, Any], final_price: int, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    automation = config.get("automation", {})
+    safe_enabled = bool(automation.get("safe_guard_enabled", False))
+    safe_limit = max(0.0, parse_float_config(automation.get("safe_guard_max_increase_ratio"), 0.0))
+    previous_price = config.get("pricing", {}).get("last_submitted_price")
+    if not safe_enabled:
+        payload["safe_guard"] = {"enabled": False, "triggered": False}
+        return int(final_price), payload
+    try:
+        previous = int(previous_price) if previous_price not in (None, "") else None
+    except Exception:
+        previous = None
+    if previous is None or previous <= 0:
+        payload["safe_guard"] = {"enabled": True, "triggered": False, "previous_price": previous}
+        return int(final_price), payload
+    limit_price = int(math.floor(previous * (1.0 + safe_limit)))
+    triggered = final_price > limit_price
+    payload["safe_guard"] = {
+        "enabled": True,
+        "triggered": triggered,
+        "previous_price": previous,
+        "limit_price": limit_price,
+        "safe_limit_ratio": safe_limit,
+    }
+    if triggered:
+        payload["skip_submit"] = True
+        payload["reason"] = (
+            f"safe_guard blocked: {final_price} > {limit_price} "
+            f"(previous={previous}, ratio={safe_limit:.4f})"
+        )
+        return int(final_price), payload
+    return int(final_price), payload
+
+
+def apply_sticky_increment(config: dict[str, Any], final_price: int) -> tuple[int, str | None]:
+    pricing = config.get("pricing", {})
+    automation = config.get("automation", {})
+    increment_ratio = max(0.0, parse_float_config(automation.get("sticky_increment_ratio"), 0.0))
+    if increment_ratio <= 0:
+        return int(final_price), None
+    previous_price = pricing.get("last_submitted_price")
+    try:
+        previous = int(previous_price) if previous_price not in (None, "") else None
+    except Exception:
+        previous = None
+    if previous is None or previous <= 0:
+        return int(final_price), None
+    if int(final_price) != int(previous):
+        return int(final_price), None
+    raised = choose_rounding(float(final_price) * (1.0 + increment_ratio), str(pricing.get("rounding", "floor_int")))
+    if raised <= int(final_price):
+        raised = int(final_price) + 1
+    return int(raised), f"sticky_increment previous={previous} ratio={increment_ratio:.4f} -> {raised}"
 
 
 def compute_bid_price(
@@ -744,10 +911,11 @@ def compute_bid_price(
     price_config: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
     pricing = config.get("pricing", {})
-    fallback = int(pricing.get("fallback_bid_price", 22223))
+    fallback = parse_int_config(pricing.get("fallback_bid_price"), 22223)
     min_facts = int(pricing.get("min_useful_facts", 1))
     multiplier = int(pricing.get("computed_price_multiplier", 10000))
     rounding = str(pricing.get("rounding", "floor_int"))
+    mode = str(config.get("automation", {}).get("selected_mode", "normal")).strip().lower()
 
     parsed = parsed_patch
     advisor_input = build_advisor_input_from_patch(config, parsed_patch, round_no, price_config)
@@ -769,12 +937,15 @@ def compute_bid_price(
     result = evaluate(advisor_input)
     payload["result"] = result
     errors = result.get("errors") or []
-    if errors:
+    if errors and mode != "express":
         payload["fallback"] = True
         payload["reason"] = "; ".join(str(item) for item in errors)
         return fallback, payload
 
-    value, source_reason = choose_bid_value_by_mode(config, result)
+    if mode == "express":
+        value, source_reason = choose_express_bid_value(config, parsed_patch)
+    else:
+        value, source_reason = choose_bid_value_by_mode(config, result)
     if value is None:
         payload["fallback"] = True
         payload["reason"] = f"missing bid value: {source_reason}"
@@ -787,16 +958,35 @@ def compute_bid_price(
         payload["reason"] = f"non-positive source value: {value}"
         return fallback, payload
 
-    price = choose_rounding(value * multiplier, rounding)
+    if mode == "express":
+        price = choose_rounding(value, rounding)
+    else:
+        price = choose_rounding(value * multiplier, rounding)
     if price <= 0:
         payload["fallback"] = True
         payload["reason"] = f"non-positive final price: {price}"
         return fallback, payload
     final_price, low_price_reason = apply_observed_low_price_floor(result, price, rounding)
+    final_price, sticky_reason = apply_sticky_increment(config, final_price)
+    final_price, payload = apply_bid_cap(config, final_price, payload)
+    final_price, payload = apply_safe_guard(config, final_price, payload)
+    if payload.get("fallback"):
+        return int(final_price), payload
     if low_price_reason:
-        payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={price}; {low_price_reason}; final={final_price}"
+        if mode == "express":
+            payload["reason"] = f"{source_reason} -> input={price}; {low_price_reason}; final={final_price}"
+        else:
+            payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={price}; {low_price_reason}; final={final_price}"
     else:
-        payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={final_price}"
+        if mode == "express":
+            payload["reason"] = f"{source_reason} -> input={final_price}"
+        else:
+            payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={final_price}"
+    if sticky_reason:
+        payload["reason"] += f"; {sticky_reason}"
+    bid_cap_info = payload.get("bid_cap") or {}
+    if bid_cap_info.get("applied"):
+        payload["reason"] += f"; bid_cap={bid_cap_info.get('cap_price')}"
     return int(final_price), payload
 
 
@@ -878,7 +1068,11 @@ def handle_round(
         details=details,
         final_price=price,
     )
+    if details.get("skip_submit"):
+        log(f"bid skipped: {details.get('reason')}")
+        return knowledge_patch
     input_bid(config, price)
+    persist_last_submitted_price(config_path, price)
     return knowledge_patch
 
 
@@ -909,6 +1103,7 @@ def handle_end_transition(
 def run_loop(config_path: Path) -> None:
     config = load_json(config_path)
     price_config = load_price_config(config, config_path)
+    persist_last_submitted_price(config_path, None)
     selected_map = str(config.get("automation", {}).get("selected_map") or config.get("automation", {}).get("default_map", "4"))
     max_runs = int(config.get("automation", {}).get("selected_runs") or config.get("automation", {}).get("default_runs", 1))
     pyautogui.FAILSAFE = bool(config.get("safety", {}).get("failsafe", True))
@@ -975,6 +1170,7 @@ def run_loop(config_path: Path) -> None:
                     last_post_continue_confirm_at = confirm_at
                 completed_runs += 1
                 knowledge_patch = None
+                persist_last_submitted_price(config_path, None)
                 log(f"completed runs: {completed_runs}/{max_runs}")
                 if completed_runs >= max_runs:
                     log("target runs reached; exit")
@@ -999,6 +1195,7 @@ def run_loop(config_path: Path) -> None:
                         last_post_continue_confirm_at = confirm_at
                     handled_rounds.clear()
                     knowledge_patch = None
+                    persist_last_submitted_price(config_path, None)
                     last_lobby_at = time.monotonic()
                 else:
                     log(f"loop {loop_index}: auction lobby ignored by debounce")
@@ -1009,6 +1206,7 @@ def run_loop(config_path: Path) -> None:
                 if time.monotonic() - last_home_bid_at >= transition_debounce:
                     run_home_bid_button_transition(config)
                     knowledge_patch = None
+                    persist_last_submitted_price(config_path, None)
                     last_home_bid_at = time.monotonic()
                 else:
                     log(f"loop {loop_index}: home bid button ignored by debounce")
@@ -1024,6 +1222,7 @@ def run_loop(config_path: Path) -> None:
                 log("new auction inferred from round 1; reset handled rounds")
                 handled_rounds.clear()
                 knowledge_patch = apply_observation_memory(observation, None)
+                persist_last_submitted_price(config_path, None)
 
             if round_no in handled_rounds:
                 log(f"loop {loop_index}: round {round_no} already handled; waiting")
@@ -1056,6 +1255,7 @@ def run_loop(config_path: Path) -> None:
                 last_post_continue_confirm_at = confirm_at
             completed_runs += 1
             knowledge_patch = None
+            persist_last_submitted_price(config_path, None)
             log(f"completed runs: {completed_runs}/{max_runs}")
             if completed_runs >= max_runs:
                 log("target runs reached; exit")

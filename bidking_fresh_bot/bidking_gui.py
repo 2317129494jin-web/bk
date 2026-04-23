@@ -21,7 +21,14 @@ RISK_OPTIONS = {
     "保守": "floor_price",
     "均衡": "avg_price",
     "激进": "avg_price_plus_25",
+    "自定义": "custom_factor",
 }
+RISK_LABEL_BY_VALUE = {value: label for label, value in RISK_OPTIONS.items()}
+MODE_OPTIONS = {
+    "标准模式": "normal",
+    "快递跑刀": "express",
+}
+MODE_LABEL_BY_VALUE = {value: label for label, value in MODE_OPTIONS.items()}
 ROLE_OPTIONS = {
     "艾哈迈德": "ahmad",
     "拉文": "lavin",
@@ -42,8 +49,8 @@ class BidKingApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("竞拍之王助手")
-        self.root.geometry("1280x820")
-        self.root.minsize(1100, 720)
+        self.root.geometry("1360x940")
+        self.root.minsize(1200, 860)
 
         self.worker: threading.Thread | None = None
         self.stop_requested = False
@@ -55,15 +62,24 @@ class BidKingApp:
 
         self.map_var = tk.StringVar()
         self.runs_var = tk.StringVar()
+        self.mode_var = tk.StringVar()
         self.risk_var = tk.StringVar()
         self.role_var = tk.StringVar()
         self.tool_round_vars: dict[int, tk.BooleanVar] = {}
-        self.tool_slot_hint = tk.StringVar(value="道具一号位良品存量，二号位普品存量")
+        self.custom_risk_var = tk.StringVar()
+        self.fallback_price_var = tk.StringVar()
+        self.express_multiplier_var = tk.StringVar()
+        self.safe_guard_enabled_var = tk.BooleanVar()
+        self.safe_guard_ratio_var = tk.StringVar()
+        self.bid_cap_price_var = tk.StringVar()
+        self.sticky_increment_var = tk.StringVar()
         self.calc_vars: dict[str, tk.StringVar] = {}
         self.weight_summary_var = tk.StringVar()
 
         self.build_ui()
         self.load_into_form()
+        self.mode_var.trace_add("write", lambda *_: self.on_mode_changed())
+        self.on_mode_changed()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def load_json(self, path: Path) -> dict:
@@ -100,14 +116,27 @@ class BidKingApp:
         ttk.Label(settings_box, text="重复次数").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(settings_box, textvariable=self.runs_var, width=10).grid(row=1, column=1, sticky="w", pady=4)
 
-        ttk.Label(settings_box, text="角色").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(settings_box, text="模式").grid(row=2, column=0, sticky="w", pady=4)
+        self.mode_combo = ttk.Combobox(settings_box, textvariable=self.mode_var, state="readonly", width=20)
+        self.mode_combo["values"] = list(MODE_OPTIONS.keys())
+        self.mode_combo.grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(settings_box, text="角色").grid(row=3, column=0, sticky="w", pady=4)
         self.role_combo = ttk.Combobox(settings_box, textvariable=self.role_var, state="readonly", width=20)
         self.role_combo["values"] = list(ROLE_OPTIONS.keys())
-        self.role_combo.grid(row=2, column=1, sticky="w", pady=4)
+        self.role_combo.grid(row=3, column=1, sticky="w", pady=4)
 
-        tool_rounds_box = ttk.LabelFrame(main, text="道具使用回合", padding=10)
+        button_box = ttk.LabelFrame(main, text="3. 控制", padding=10)
+        button_box.pack(fill="x", pady=(10, 0))
+        self.start_btn = ttk.Button(button_box, text="开启", command=self.start_bot)
+        self.start_btn.pack(side="left")
+        self.stop_btn = ttk.Button(button_box, text="停止", command=self.stop_bot)
+        self.stop_btn.pack(side="left", padx=(8, 0))
+        self.stop_btn.state(["disabled"])
+
+        tool_rounds_box = ttk.LabelFrame(main, text="5. 道具使用回合", padding=10)
         tool_rounds_box.pack(fill="x", pady=(10, 0))
-        ttk.Label(tool_rounds_box, text="勾选后，该回合会自动使用最左边道具").pack(side="left", padx=(0, 12))
+        ttk.Label(tool_rounds_box, text="勾选后，该回合会自动使用最左边道具。快递跑刀默认不使用道具。").pack(side="left", padx=(0, 12))
         for round_no in range(1, 6):
             var = tk.BooleanVar(value=round_no in (1, 2))
             self.tool_round_vars[round_no] = var
@@ -119,19 +148,47 @@ class BidKingApp:
         risk_combo = ttk.Combobox(risk_box, textvariable=self.risk_var, state="readonly", width=12)
         risk_combo["values"] = list(RISK_OPTIONS.keys())
         risk_combo.pack(side="left", padx=(8, 12))
-        ttk.Label(risk_box, text="保守=保底价，均衡=平均价格，激进=平均价格+25%").pack(side="left")
+        ttk.Label(risk_box, text="自定义倍率").pack(side="left")
+        ttk.Entry(risk_box, textvariable=self.custom_risk_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(risk_box, text="例如 -0.2=平均价80%，0.8=平均价180%").pack(side="left")
 
-        hint_box = ttk.LabelFrame(main, text="5. 提示", padding=10)
-        hint_box.pack(fill="x", pady=(10, 0))
-        ttk.Label(hint_box, textvariable=self.tool_slot_hint).pack(anchor="w")
+        extra_box = ttk.LabelFrame(main, text="4. 模式与安全", padding=10)
+        extra_box.pack(fill="x", pady=(10, 0))
+        row1 = ttk.Frame(extra_box)
+        row1.pack(fill="x")
+        ttk.Label(row1, text="快递跑刀单件价格").pack(side="left")
+        ttk.Entry(row1, textvariable=self.express_multiplier_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(row1, text="快递跑刀会自动锁定地图为快递盲盒堆。出价=总物品数*单件价格，直接按个位价格出价").pack(side="left")
 
-        button_box = ttk.LabelFrame(main, text="3 / 4. 控制", padding=10)
-        button_box.pack(fill="x", pady=(10, 0))
-        self.start_btn = ttk.Button(button_box, text="开启", command=self.start_bot)
-        self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(button_box, text="停止", command=self.stop_bot)
-        self.stop_btn.pack(side="left", padx=(8, 0))
-        self.stop_btn.state(["disabled"])
+        row2 = ttk.Frame(extra_box)
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(row2, text="安全开关", variable=self.safe_guard_enabled_var).pack(side="left")
+        ttk.Label(row2, text="单回合最大加价比例").pack(side="left", padx=(12, 0))
+        ttk.Entry(row2, textvariable=self.safe_guard_ratio_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(row2, text="例如 0.5 代表超过上回合 50% 就自动取消").pack(side="left")
+
+        row3 = ttk.Frame(extra_box)
+        row3.pack(fill="x", pady=(8, 0))
+        ttk.Label(row3, text="出价硬顶").pack(side="left")
+        ttk.Entry(row3, textvariable=self.bid_cap_price_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(row3, text="达到硬顶后停止继续加价，0 代表无硬顶").pack(side="left")
+
+        row4 = ttk.Frame(extra_box)
+        row4.pack(fill="x", pady=(8, 0))
+        ttk.Label(row4, text="防黏递增比例").pack(side="left")
+        ttk.Entry(row4, textvariable=self.sticky_increment_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(row4, text="若本回合与上回合出价相同，则自动递增该百分比").pack(side="left")
+
+        row5 = ttk.Frame(extra_box)
+        row5.pack(fill="x", pady=(8, 0))
+        ttk.Label(row5, text="Fallback 出价").pack(side="left")
+        ttk.Entry(row5, textvariable=self.fallback_price_var, width=10).pack(side="left", padx=(8, 12))
+        ttk.Label(row5, text="识别失败或被安全开关拦截时使用").pack(side="left")
+
+        tip_box = ttk.LabelFrame(main, text="7. 道具提示", padding=10)
+        tip_box.pack(fill="x", pady=(10, 0))
+        ttk.Label(tip_box, text="维克托：优先带紫色数量、橙色均格；有钱可以带橙色扫描").pack(anchor="w")
+        ttk.Label(tip_box, text="石油佬：优先带蓝色数量、绿白均格、绿白总格").pack(anchor="w", pady=(6, 0))
 
         log_box = ttk.LabelFrame(main, text="运行日志 / Debug", padding=10)
         log_box.pack(fill="both", expand=True, pady=(10, 0))
@@ -208,9 +265,21 @@ class BidKingApp:
         default_map = str(self.config.get("automation", {}).get("default_map", "4"))
         self.map_var.set(f"{default_map}. {self.config['automation']['maps'][default_map]['name']}")
         self.runs_var.set(str(self.config.get("automation", {}).get("default_runs", 1)))
+        selected_mode = self.config.get("automation", {}).get("selected_mode", "normal")
+        mode_label = MODE_LABEL_BY_VALUE.get(selected_mode, "标准模式")
+        self.mode_var.set(mode_label)
         self.risk_var.set("均衡")
         role = self.config.get("advisor", {}).get("role", "ahmad")
         self.role_var.set(ROLE_LABEL_BY_VALUE.get(role, "艾哈迈德"))
+        selected_risk = self.config.get("automation", {}).get("selected_risk", "avg_price")
+        self.risk_var.set(RISK_LABEL_BY_VALUE.get(selected_risk, "均衡"))
+        self.custom_risk_var.set(str(self.config.get("automation", {}).get("custom_risk_factor", 0.0)))
+        self.fallback_price_var.set(str(self.config.get("pricing", {}).get("fallback_bid_price", 30000)))
+        self.express_multiplier_var.set(str(self.config.get("automation", {}).get("express_total_multiplier", 1000)))
+        self.safe_guard_enabled_var.set(bool(self.config.get("automation", {}).get("safe_guard_enabled", False)))
+        self.safe_guard_ratio_var.set(str(self.config.get("automation", {}).get("safe_guard_max_increase_ratio", 0.5)))
+        self.bid_cap_price_var.set(str(self.config.get("automation", {}).get("bid_cap_price", 0)))
+        self.sticky_increment_var.set(str(self.config.get("automation", {}).get("sticky_increment_ratio", 0.03)))
         tool_rounds = {int(item) for item in self.config.get("automation", {}).get("tool_rounds", [1, 2])}
         for round_no, var in self.tool_round_vars.items():
             var.set(round_no in tool_rounds)
@@ -229,16 +298,36 @@ class BidKingApp:
 
     def apply_form_to_config(self) -> None:
         runs_value = int(self.runs_var.get()) if self.runs_var.get().isdigit() and int(self.runs_var.get()) > 0 else 1
+        selected_mode = MODE_OPTIONS.get(self.mode_var.get().strip(), "normal")
         selected_map = self.selected_map_key() or "4"
-        selected_risk = self.risk_var.get().strip() or "均衡"
+        if selected_mode == "express":
+            selected_map = "1"
+        selected_risk = RISK_OPTIONS.get(self.risk_var.get().strip(), "avg_price")
         selected_role = ROLE_OPTIONS.get(self.role_var.get().strip(), "ahmad")
         selected_tool_rounds = [round_no for round_no, var in self.tool_round_vars.items() if var.get()]
+        if selected_mode == "express":
+            selected_tool_rounds = []
+        custom_risk_factor = float(self.custom_risk_var.get().strip() or "0")
+        fallback_bid_price = int(float(self.fallback_price_var.get().strip() or "30000"))
+        express_total_multiplier = float(self.express_multiplier_var.get().strip() or "1000")
+        safe_guard_ratio = float(self.safe_guard_ratio_var.get().strip() or "0")
+        bid_cap_price = int(float(self.bid_cap_price_var.get().strip() or "0"))
+        sticky_increment_ratio = float(self.sticky_increment_var.get().strip() or "0")
 
         self.config.setdefault("automation", {})
+        self.config.setdefault("pricing", {})
         self.config["automation"]["selected_map"] = selected_map
         self.config["automation"]["selected_runs"] = runs_value
         self.config["automation"]["selected_risk"] = selected_risk
+        self.config["automation"]["selected_mode"] = selected_mode
+        self.config["automation"]["custom_risk_factor"] = custom_risk_factor
+        self.config["automation"]["express_total_multiplier"] = express_total_multiplier
+        self.config["automation"]["safe_guard_enabled"] = bool(self.safe_guard_enabled_var.get())
+        self.config["automation"]["safe_guard_max_increase_ratio"] = safe_guard_ratio
+        self.config["automation"]["bid_cap_price"] = bid_cap_price
+        self.config["automation"]["sticky_increment_ratio"] = sticky_increment_ratio
         self.config["automation"]["tool_rounds"] = selected_tool_rounds
+        self.config["pricing"]["fallback_bid_price"] = fallback_bid_price
         self.config.setdefault("advisor", {})["role"] = selected_role
 
         self.save_json(CONFIG_PATH, self.config)
@@ -251,6 +340,16 @@ class BidKingApp:
             self.weight_summary_var.set("当前已修改: " + "，".join(non_default))
         else:
             self.weight_summary_var.set("当前全部为默认权重 1")
+
+    def on_mode_changed(self) -> None:
+        mode = MODE_OPTIONS.get(self.mode_var.get().strip(), "normal")
+        if mode == "express":
+            self.map_var.set(f"1. {self.config['automation']['maps']['1']['name']}")
+            self.map_combo.state(["disabled"])
+            for var in self.tool_round_vars.values():
+                var.set(False)
+        else:
+            self.map_combo.state(["!disabled"])
 
     def open_weight_editor(self) -> None:
         top = tk.Toplevel(self.root)

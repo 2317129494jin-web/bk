@@ -61,7 +61,6 @@ def normalize_text(text: str) -> str:
         .replace("）", ")")
         .replace("约为", "约")
         .replace("本场拍卖", "本次竞拍")
-        .replace("道具", "藏品")
     )
 
 
@@ -84,6 +83,14 @@ def normalize_number(raw: str) -> float:
 
 def maybe_int(value: float) -> int | float:
     return int(value) if abs(value - int(value)) < 1e-9 else value
+
+
+def is_likely_item_line(line: str) -> bool:
+    return "藏品" in line or "品质" in line or "道具" in line
+
+
+def optional_item_word_pattern() -> str:
+    return r"(?:藏品|道具|品质藏品|品质道具)?"
 
 
 def ensure_constraint(result: dict[str, Any], color: str) -> dict[str, Any]:
@@ -119,10 +126,10 @@ def parse_total_all(line: str) -> int | None:
 
 def parse_victor_total_all(line: str) -> int | None:
     patterns = [
-        r"本次竞拍共有品质紫色[、,]金色[、,]红色藏品(\d+)件",
-        r"本次竞拍共有品质紫色[、,]橙色[、,]红色藏品(\d+)件",
-        r"共有品质紫色[、,]金色[、,]红色藏品(\d+)件",
-        r"共有品质紫色[、,]橙色[、,]红色藏品(\d+)件",
+        r"本次竞拍共有品质紫色[、,]金色[、,]红色(?:藏品|道具)(\d+)件",
+        r"本次竞拍共有品质紫色[、,]橙色[、,]红色(?:藏品|道具)(\d+)件",
+        r"共有品质紫色[、,]金色[、,]红色(?:藏品|道具)(\d+)件",
+        r"共有品质紫色[、,]橙色[、,]红色(?:藏品|道具)(\d+)件",
     ]
     for pattern in patterns:
         match = re.search(pattern, line)
@@ -255,17 +262,17 @@ def parse_round(line: str) -> int | None:
 
 
 def parse_color_count(line: str) -> tuple[str, int] | None:
-    if has_wg_phrase(line):
+    if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        color_pattern() + r"(?:藏品)?(?:的)?(?:总数量|总件数|件数|数量)为(\d+)(?:件)?",
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?(?:总数量|总件数|件数|数量)为(\d+)(?:件)?",
         line,
     )
     if match:
         return color_name(match.group(1)), int(match.group(2))
 
     match = re.search(
-        r"共有" + color_pattern() + r"(?:藏品)?(\d+)(?:件)?",
+        r"共有" + color_pattern() + optional_item_word_pattern() + r"(\d+)(?:件)?",
         line,
     )
     if match:
@@ -274,10 +281,10 @@ def parse_color_count(line: str) -> tuple[str, int] | None:
 
 
 def parse_color_grid(line: str) -> tuple[str, int] | None:
-    if has_wg_phrase(line):
+    if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        color_pattern() + r"(?:藏品)?(?:的)?(?:总格子数量|总占用格子数量|占用的格子数量)为(\d+)(?:格)?",
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?(?:总格子数量|总占用格子数量|占用的格子数量)为(\d+)(?:格)?",
         line,
     )
     if match:
@@ -286,10 +293,10 @@ def parse_color_grid(line: str) -> tuple[str, int] | None:
 
 
 def parse_color_avg(line: str) -> tuple[str, int | float] | None:
-    if has_wg_phrase(line):
+    if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        color_pattern() + r"(?:藏品)?平均格(?:子)?数(?:约为|为)?([\d,]+(?:\.\d+)?)(?:格)?",
+        color_pattern() + optional_item_word_pattern() + r"平均格(?:子)?数(?:约为|为)?([\d,]+(?:\.\d+)?)(?:格)?",
         line,
     )
     if match:
@@ -298,16 +305,16 @@ def parse_color_avg(line: str) -> tuple[str, int | float] | None:
 
 
 def parse_color_avg_price(line: str) -> tuple[str, float] | None:
-    if has_wg_phrase(line):
+    if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        r"所有" + color_pattern() + r"(?:藏品|品质藏品)?的?平均价值约(?:为)?([\d,]+(?:\.\d+)?)",
+        r"所有" + color_pattern() + optional_item_word_pattern() + r"的?平均价值约(?:为)?([\d,]+(?:\.\d+)?)",
         line,
     )
     if match:
         return color_name(match.group(1)), normalize_number(match.group(2))
     match = re.search(
-        color_pattern() + r"(?:藏品|品质藏品)?(?:的)?平均价值约(?:为)?([\d,]+(?:\.\d+)?)",
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?平均价值约(?:为)?([\d,]+(?:\.\d+)?)",
         line,
     )
     if match:
@@ -316,16 +323,16 @@ def parse_color_avg_price(line: str) -> tuple[str, float] | None:
 
 
 def parse_color_total_price(line: str) -> tuple[str, float] | None:
-    if has_wg_phrase(line):
+    if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        r"所有" + color_pattern() + r"(?:藏品|品质藏品)?的?总价值约(?:为)?([\d,]+(?:\.\d+)?)",
+        r"所有" + color_pattern() + optional_item_word_pattern() + r"的?总价值约(?:为)?([\d,]+(?:\.\d+)?)",
         line,
     )
     if match:
         return color_name(match.group(1)), normalize_number(match.group(2))
     match = re.search(
-        color_pattern() + r"(?:藏品|品质藏品)?(?:的)?总价值约(?:为)?([\d,]+(?:\.\d+)?)",
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?总价值约(?:为)?([\d,]+(?:\.\d+)?)",
         line,
     )
     if match:
