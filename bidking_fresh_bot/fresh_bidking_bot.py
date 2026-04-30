@@ -169,6 +169,7 @@ def default_advisor_input() -> dict[str, Any]:
     return {
         "round": 1,
         "my_role": "ahmad",
+        "maria_start_price": None,
         "total_all": None,
         "avg_grid_all": None,
         "count_green": None,
@@ -257,6 +258,7 @@ def merge_parsed_memory(current: dict[str, Any] | None, new_patch: dict[str, Any
         "count_green",
         "count_white",
         "avg_grid_all",
+        "maria_start_price",
     }
     sticky_constraint_fields = {"count", "grid", "avg"}
     if not same_round:
@@ -851,6 +853,22 @@ def choose_bid_value_by_mode(config: dict[str, Any], result: dict[str, Any]) -> 
     return summary.get("avg_price"), "均衡=avg_price"
 
 
+def is_maria_role(config: dict[str, Any]) -> bool:
+    role = str(config.get("advisor", {}).get("role", "")).strip().lower()
+    return role in {"maria", "mary", "mariya", "maliya", "玛丽亚"}
+
+
+def choose_maria_bid_value(parsed_patch: dict[str, Any]) -> tuple[float | None, str]:
+    raw_value = (parsed_patch or {}).get("maria_start_price")
+    try:
+        value = float(raw_value) if raw_value not in (None, "") else None
+    except Exception:
+        value = None
+    if value is None or value <= 0:
+        return None, "玛丽亚缺少白绿蓝总价值"
+    return value, f"玛丽亚=白绿蓝总价值({value:.0f})"
+
+
 def choose_express_bid_value(config: dict[str, Any], parsed_patch: dict[str, Any]) -> tuple[float | None, str]:
     automation = config.get("automation", {})
     total_all = parsed_patch.get("total_all")
@@ -969,6 +987,30 @@ def compute_bid_price(
         "result": {},
         "source_value": None,
     }
+    if is_maria_role(config):
+        value, source_reason = choose_maria_bid_value(parsed_patch)
+        if value is None:
+            payload["fallback"] = True
+            payload["reason"] = f"missing bid value: {source_reason}"
+            return fallback, payload
+        payload["source_value"] = value
+        price = choose_rounding(float(value), rounding)
+        if price <= 0:
+            payload["fallback"] = True
+            payload["reason"] = f"non-positive final price: {price}"
+            return fallback, payload
+        final_price, sticky_reason = apply_sticky_increment(config, price)
+        final_price, payload = apply_bid_cap(config, final_price, payload)
+        final_price, payload = apply_safe_guard(config, final_price, payload)
+        if not payload.get("fallback") and not payload.get("skip_submit"):
+            payload["reason"] = f"{source_reason} -> input={final_price}"
+            if sticky_reason:
+                payload["reason"] += f"; {sticky_reason}"
+            bid_cap_info = payload.get("bid_cap") or {}
+            if bid_cap_info.get("applied"):
+                payload["reason"] += f"; bid_cap={bid_cap_info.get('cap_price')}"
+        return int(final_price), payload
+
     if len(facts) < min_facts:
         payload["fallback"] = True
         payload["reason"] = f"not enough parsed facts: {len(facts)}"

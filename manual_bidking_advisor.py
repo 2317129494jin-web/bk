@@ -61,6 +61,7 @@ COLOR_LABELS = {"blue": "蓝色", "purple": "紫色", "gold": "橙色", "red": "
 FIELD_LABELS = {
     "total_all": "总藏品数",
     "victor_total_all": "维克托紫橙红总件数",
+    "maria_start_price": "玛丽亚白绿蓝总价值",
     "total_grid_all": "全部总格子数",
     "count_green": "绿色数量",
     "count_white": "白色数量",
@@ -80,18 +81,23 @@ FIELD_LABELS = {
     "avg_gold": "橙色平均格子",
     "avg_red": "红色平均格子",
 }
-ROLE_LABELS = {"ahmad": "艾哈迈德", "lavin": "拉文", "victor": "维克托", "none": "未知/通用"}
+ROLE_LABELS = {"ahmad": "艾哈迈德", "lavin": "拉文", "victor": "维克托", "maria": "玛丽亚", "none": "未知/通用"}
 ROLE_ALIASES = {
     "ahmed": "ahmad",
     "role2": "ahmad",
     "raven": "lavin",
     "role3": "lavin",
     "weiketu": "victor",
+    "mary": "maria",
+    "mariya": "maria",
+    "maliya": "maria",
+    "玛丽亚": "maria",
 }
 ROLE_AUTO_FIELDS = {
     "ahmad": {1: ["total_all"], 2: ["avg_gold"], 3: ["avg_purple"], 4: ["avg_blue"], 5: ["wg_total"]},
     "lavin": {5: ["count_blue", "count_purple", "count_gold", "count_red", "wg_total"]},
     "victor": {1: ["total_all"]},
+    "maria": {1: ["maria_start_price"]},
 }
 ROUND_RULES = {
     1: {"multiplier": 2.0, "pace": 0.42, "label": "两倍出价第二直接获得"},
@@ -717,6 +723,45 @@ def evaluate_lavin(data: dict) -> dict:
     }
 
 
+def evaluate_maria(data: dict) -> dict:
+    raw_price = as_non_neg_float(data.get("maria_start_price")) or 0.0
+    price_w = raw_price_to_w(raw_price) or 0.0
+    round_no = max(1, min(5, as_non_neg_int(data.get("round")) or 1))
+    round_rule = ROUND_RULES.get(round_no, ROUND_RULES[5])
+    grid_prices = resolve_grid_prices(data)
+    summary = {
+        "combo_count": 1,
+        "conservative_floor": price_w,
+        "floor_price": price_w,
+        "avg_price": price_w,
+        "conservative_bid_price": price_w,
+        "balanced_bid_price": price_w,
+        "aggressive_bid_price": price_w,
+        "possible_low_price": price_w,
+        "possible_high_price": price_w,
+        "uncertainty": 0.0,
+        "round_rule": round_rule["label"],
+        "avg_tolerance": as_non_neg_float(data.get("avg_tolerance")) or 0.05,
+        "observed_low_price": as_non_neg_float(data.get("observed_low_price")),
+        "wg_candidates": [],
+        "total_grid_candidates": [],
+        "grid_prices": grid_prices,
+    }
+    solved = empty_solved()
+    return {
+        "errors": [],
+        "warns": [],
+        "summary": summary,
+        "solved": solved,
+        "combos_preview": [],
+        "info_suggestions": [],
+        "auto_fields_now": fields_known_by_role("maria", round_no),
+        "role_label": ROLE_LABELS["maria"],
+        "resolved_wg_total": None,
+        "maria_direct_price": raw_price,
+    }
+
+
 def rounds_until_auto(role: str, current_round: int, field: str) -> Optional[int]:
     role_map = ROLE_AUTO_FIELDS.get(normalize_role(role), {})
     for reveal_round, fields in sorted(role_map.items()):
@@ -820,6 +865,16 @@ def compute_info_suggestions(data: dict, solved: dict, combo_count: int) -> List
 def validate_input(data: dict) -> List[str]:
     warns = []
     role = normalize_role(data.get("my_role", "none"))
+    if role == "maria":
+        try:
+            maria_start_price = as_non_neg_float(data.get("maria_start_price"))
+        except Exception as exc:
+            warns.append(f"玛丽亚起拍价输入非法: {exc}")
+            return warns
+        if maria_start_price is None or maria_start_price <= 0:
+            warns.append("缺少 maria_start_price（玛丽亚白绿蓝总价值）")
+        return warns
+
     total_all = as_non_neg_int(data.get("victor_total_all")) if role == "victor" else as_non_neg_int(data.get("total_all"))
     total_grid_all = derive_total_grid_all(data)
     wg_total = green_white_total(data)
@@ -883,6 +938,8 @@ def evaluate(data: dict) -> dict:
         role = "ahmad"
     if role == "lavin":
         return evaluate_lavin(data)
+    if role == "maria":
+        return evaluate_maria(data)
 
     max_count = as_non_neg_int(data.get("max_count")) or 60
     max_show = as_non_neg_int(data.get("max_show")) or 20
@@ -1015,6 +1072,20 @@ def render_report(data: dict, result: dict) -> str:
 
     summary = result["summary"]
     solved = result["solved"]
+
+    if result.get("maria_direct_price") is not None:
+        raw_price = float(result["maria_direct_price"])
+        return "\n".join(
+            [
+                "竞拍之王手动判断报告",
+                "=" * 26,
+                f"回合: {data.get('round')} | 角色: {result['role_label']}",
+                "",
+                "核心估值",
+                f"- 玛丽亚识别起拍价: {raw_price:.0f}",
+                f"- 折算展示: {format_w(summary['avg_price'])}",
+            ]
+        )
 
     lines = []
     lines.append("竞拍之王手动判断报告")

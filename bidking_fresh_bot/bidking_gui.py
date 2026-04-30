@@ -33,6 +33,7 @@ ROLE_OPTIONS = {
     "艾哈迈德": "ahmad",
     "拉文": "lavin",
     "维克托": "victor",
+    "玛丽亚": "maria",
 }
 ROLE_LABEL_BY_VALUE = {value: label for label, value in ROLE_OPTIONS.items()}
 
@@ -202,6 +203,7 @@ class BidKingApp:
         fields = [
             ("round", "回合", "1"),
             ("role", "角色", ""),
+            ("maria_start_price", "玛丽亚起拍价", ""),
             ("total_all", "总藏品数", ""),
             ("avg_grid_all", "总平均格子", ""),
             ("total_grid_all", "全部总格数", ""),
@@ -418,6 +420,7 @@ class BidKingApp:
         payload = bot.apply_price_config(payload, self.price_config)
         payload["my_role"] = role
         payload["round"] = self._int_or_none(self.calc_vars["round"].get()) or 1
+        payload["maria_start_price"] = self._float_or_none(self.calc_vars["maria_start_price"].get())
         for key in ("total_all", "avg_grid_all", "total_grid_all", "wg_total", "count_white", "count_green"):
             payload[key] = self._float_or_none(self.calc_vars[key].get()) if key == "avg_grid_all" else self._int_or_none(self.calc_vars[key].get())
         payload["constraints"] = {

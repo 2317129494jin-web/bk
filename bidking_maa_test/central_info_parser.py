@@ -241,6 +241,22 @@ def parse_green_white_total_price(line: str) -> float | None:
     return None
 
 
+def parse_maria_start_price(line: str) -> float | None:
+    if not all(token in line for token in ("白色", "绿色", "蓝色")):
+        return None
+    if not any(token in line for token in ("总价值", "总价", "价值")):
+        return None
+    patterns = [
+        r"(?:总价值|总价|价值)(?:约)?(?:为)?([\d,]+(?:\.\d+)?)",
+        r"(?:总价值|总价|价值).*?([\d,]+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return normalize_number(match.group(1))
+    return None
+
+
 def parse_low_price(line: str) -> float | None:
     patterns = [
         r"当前预估最低价格[:：]?([\d,]+(?:\.\d+)?)",
@@ -417,6 +433,12 @@ def parse_central_info(text: str) -> dict[str, Any]:
         if green_white_total_price is not None:
             result["total_price_wg"] = green_white_total_price
             append_fact(result, "total_price_wg", green_white_total_price, raw_line)
+            parsed_any = True
+
+        maria_start_price = parse_maria_start_price(line)
+        if maria_start_price is not None:
+            result["maria_start_price"] = maria_start_price
+            append_fact(result, "maria_start_price", maria_start_price, raw_line)
             parsed_any = True
 
         low_price = parse_low_price(line)
