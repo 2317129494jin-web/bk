@@ -69,7 +69,9 @@ def normalize_line(line: str) -> str:
     line = re.sub(r"\s+", "", line)
     line = line.replace("所有藏品总占用的格子数量", "所有藏品总格子数量")
     line = line.replace("总占用的格子数量", "总格子数量")
+    line = line.replace("总占用的格子数", "总格子数量")
     line = line.replace("总占用格子数量", "总格子数量")
+    line = line.replace("总占用格数", "总格子数量")
     line = line.replace("平均格数约", "平均格数约为")
     line = line.replace("平均格子数约", "平均格数约为")
     line = line.replace("平均格数", "平均格数")
@@ -280,12 +282,14 @@ def parse_round(line: str) -> int | None:
 def parse_color_count(line: str) -> tuple[str, int] | None:
     if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
-    match = re.search(
-        color_pattern() + optional_item_word_pattern() + r"(?:的)?(?:总数量|总件数|件数|数量)为(\d+)(?:件)?",
-        line,
-    )
-    if match:
-        return color_name(match.group(1)), int(match.group(2))
+    patterns = [
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?(?:总数量|总件数|总藏品数量|藏品数量|件数|数量)(?:约为|为|是)(\d+)(?:件)?",
+        r"(?:本次竞拍|本场拍卖)?(?:共有|显示|包含)" + color_pattern() + optional_item_word_pattern() + r"(\d+)(?:件)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return color_name(match.group(1)), int(match.group(2))
 
     match = re.search(
         r"共有" + color_pattern() + optional_item_word_pattern() + r"(\d+)(?:件)?",
@@ -299,12 +303,18 @@ def parse_color_count(line: str) -> tuple[str, int] | None:
 def parse_color_grid(line: str) -> tuple[str, int] | None:
     if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
-    match = re.search(
-        color_pattern() + optional_item_word_pattern() + r"(?:的)?(?:总格子数量|总占用格子数量|占用的格子数量)为(\d+)(?:格)?",
-        line,
-    )
-    if match:
-        return color_name(match.group(1)), int(match.group(2))
+    patterns = [
+        color_pattern()
+        + optional_item_word_pattern()
+        + r"(?:的)?(?:总格子数量|总格数|总占用格子数量|总占用格数|占用的格子数量|占用格子数量|占用格数)(?:约为|为|是)(\d+)(?:格)?",
+        color_pattern()
+        + optional_item_word_pattern()
+        + r"(?:的)?(?:格子数量|格数)(?:总共|合计)?(?:约为|为|是)(\d+)(?:格)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return color_name(match.group(1)), int(match.group(2))
     return None
 
 
@@ -312,7 +322,7 @@ def parse_color_avg(line: str) -> tuple[str, int | float] | None:
     if has_wg_phrase(line) or not is_likely_item_line(line):
         return None
     match = re.search(
-        color_pattern() + optional_item_word_pattern() + r"平均格(?:子)?数(?:约为|为)?([\d,]+(?:\.\d+)?)(?:格)?",
+        color_pattern() + optional_item_word_pattern() + r"(?:的)?平均格(?:子)?数(?:约为|为)?([\d,]+(?:\.\d+)?)(?:格)?",
         line,
     )
     if match:

@@ -75,6 +75,8 @@ class BidKingApp:
         self.bid_cap_price_var = tk.StringVar()
         self.sticky_increment_var = tk.StringVar()
         self.maria_round_bid_scheme_enabled_var = tk.BooleanVar()
+        self.ahmad_gold_grid_bonus_enabled_var = tk.BooleanVar()
+        self.ahmad_gold_grid_scaled_scheme_enabled_var = tk.BooleanVar()
         self.calc_vars: dict[str, tk.StringVar] = {}
         self.weight_summary_var = tk.StringVar()
 
@@ -179,7 +181,7 @@ class BidKingApp:
         row4.pack(fill="x", pady=(8, 0))
         ttk.Label(row4, text="防黏递增比例").pack(side="left")
         ttk.Entry(row4, textvariable=self.sticky_increment_var, width=10).pack(side="left", padx=(8, 12))
-        ttk.Label(row4, text="按首个出价生成固定步长，后续每回合线性递增且不自动降价").pack(side="left")
+        ttk.Label(row4, text="按首个出价生成固定步长，后续每回合线性递增且不自动降价；艾哈迈德方案不应用").pack(side="left")
 
         row5 = ttk.Frame(extra_box)
         row5.pack(fill="x", pady=(8, 0))
@@ -191,6 +193,16 @@ class BidKingApp:
         row6.pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(row6, text="玛丽亚专用出价方案", variable=self.maria_round_bid_scheme_enabled_var).pack(side="left")
         ttk.Label(row6, text="仅角色为玛丽亚时生效：1/2回合85%，3回合x1.33，4回合x1.1x1.1，5回合x1.03").pack(side="left", padx=(12, 0))
+
+        row7 = ttk.Frame(extra_box)
+        row7.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(row7, text="艾哈迈德金/紫均加价", variable=self.ahmad_gold_grid_bonus_enabled_var).pack(side="left")
+        ttk.Label(row7, text="仅角色为艾哈迈德时生效：第2轮识别橙/金均格，第3轮识别紫均格；仓库金按表估值，紫按每格2000").pack(side="left", padx=(12, 0))
+
+        row8 = ttk.Frame(extra_box)
+        row8.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(row8, text="艾哈迈德金均递增方案", variable=self.ahmad_gold_grid_scaled_scheme_enabled_var).pack(side="left")
+        ttk.Label(row8, text="开启后：第3轮加80%(金+紫)，第4轮=第3轮最终价x1.1x1.1，第5轮=第4轮最终价x1.03；关闭则按旧方案直接加100%").pack(side="left", padx=(12, 0))
 
         tip_box = ttk.LabelFrame(main, text="7. 道具提示", padding=10)
         tip_box.pack(fill="x", pady=(10, 0))
@@ -289,6 +301,8 @@ class BidKingApp:
         self.bid_cap_price_var.set(str(self.config.get("automation", {}).get("bid_cap_price", 0)))
         self.sticky_increment_var.set(str(self.config.get("automation", {}).get("sticky_increment_ratio", 0.03)))
         self.maria_round_bid_scheme_enabled_var.set(bool(self.config.get("automation", {}).get("maria_round_bid_scheme_enabled", True)))
+        self.ahmad_gold_grid_bonus_enabled_var.set(bool(self.config.get("automation", {}).get("ahmad_gold_grid_bonus_enabled", True)))
+        self.ahmad_gold_grid_scaled_scheme_enabled_var.set(bool(self.config.get("automation", {}).get("ahmad_gold_grid_scaled_scheme_enabled", True)))
         tool_rounds = {int(item) for item in self.config.get("automation", {}).get("tool_rounds", [1, 2])}
         for round_no, var in self.tool_round_vars.items():
             var.set(round_no in tool_rounds)
@@ -309,8 +323,6 @@ class BidKingApp:
         runs_value = int(self.runs_var.get()) if self.runs_var.get().isdigit() and int(self.runs_var.get()) > 0 else 1
         selected_mode = MODE_OPTIONS.get(self.mode_var.get().strip(), "normal")
         selected_map = self.selected_map_key() or "4"
-        if selected_mode == "express":
-            selected_map = "1"
         selected_risk = RISK_OPTIONS.get(self.risk_var.get().strip(), "avg_price")
         selected_role = ROLE_OPTIONS.get(self.role_var.get().strip(), "ahmad")
         selected_tool_rounds = [round_no for round_no, var in self.tool_round_vars.items() if var.get()]
@@ -336,6 +348,8 @@ class BidKingApp:
         self.config["automation"]["bid_cap_price"] = bid_cap_price
         self.config["automation"]["sticky_increment_ratio"] = sticky_increment_ratio
         self.config["automation"]["maria_round_bid_scheme_enabled"] = bool(self.maria_round_bid_scheme_enabled_var.get())
+        self.config["automation"]["ahmad_gold_grid_bonus_enabled"] = bool(self.ahmad_gold_grid_bonus_enabled_var.get())
+        self.config["automation"]["ahmad_gold_grid_scaled_scheme_enabled"] = bool(self.ahmad_gold_grid_scaled_scheme_enabled_var.get())
         self.config["automation"]["tool_rounds"] = selected_tool_rounds
         self.config["pricing"]["fallback_bid_price"] = fallback_bid_price
         self.config.setdefault("advisor", {})["role"] = selected_role
@@ -354,8 +368,7 @@ class BidKingApp:
     def on_mode_changed(self) -> None:
         mode = MODE_OPTIONS.get(self.mode_var.get().strip(), "normal")
         if mode == "express":
-            self.map_var.set(f"1. {self.config['automation']['maps']['1']['name']}")
-            self.map_combo.state(["disabled"])
+            self.map_combo.state(["!disabled"])
             for var in self.tool_round_vars.values():
                 var.set(False)
         else:

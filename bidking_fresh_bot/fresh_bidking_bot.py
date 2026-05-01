@@ -452,6 +452,118 @@ def scaled_region_box(region: dict[str, Any], config: dict[str, Any], image_widt
     return int(left), int(top), int(right), int(bottom)
 
 
+def has_purple_outline_signal(text: str) -> bool:
+    tight = compact_text(text)
+    if "紫" not in tight:
+        return False
+    if not any(token in tight for token in ("轮廓", "轮廊", "廓")):
+        return False
+    return "显示" in tight or "所有" in tight or "藏品" in tight
+
+
+def is_purple_outline_pixel(pixel: tuple[int, int, int]) -> bool:
+    r, g, b = pixel[:3]
+    return b >= 120 and r >= 85 and g <= 145 and (b - g) >= 45 and (r - g) >= 20
+
+
+def connected_component_boxes(mask: bytearray, width: int, height: int) -> list[tuple[int, int, int, int, int]]:
+    boxes: list[tuple[int, int, int, int, int]] = []
+    for start in range(width * height):
+        if not mask[start]:
+            continue
+        stack = [start]
+        mask[start] = 0
+        min_x = max_x = start % width
+        min_y = max_y = start // width
+        area = 0
+        while stack:
+            index = stack.pop()
+            area += 1
+            x = index % width
+            y = index // width
+            if x < min_x:
+                min_x = x
+            elif x > max_x:
+                max_x = x
+            if y < min_y:
+                min_y = y
+            elif y > max_y:
+                max_y = y
+            for neighbor in (index - 1, index + 1, index - width, index + width):
+                if neighbor < 0 or neighbor >= width * height or not mask[neighbor]:
+                    continue
+                if neighbor == index - 1 and x == 0:
+                    continue
+                if neighbor == index + 1 and x == width - 1:
+                    continue
+                mask[neighbor] = 0
+                stack.append(neighbor)
+        boxes.append((min_x, min_y, max_x + 1, max_y + 1, area))
+    return boxes
+
+
+def detect_purple_outline_count(config: dict[str, Any], frame: Image.Image) -> tuple[int | None, list[tuple[int, int, int, int]]]:
+    visual = config.get("visual_detection", {})
+    if not bool(visual.get("purple_outline_count_enabled", True)):
+        return None, []
+    region = visual.get("loot_panel_region")
+    if not region:
+        return None, []
+    left, top, right, bottom = scaled_region_box(region, config, frame.width, frame.height)
+    if right <= left or bottom <= top:
+        return None, []
+    crop = frame.crop((left, top, right, bottom)).convert("RGB")
+    width, height = crop.size
+    pixels = crop.load()
+    mask = bytearray(width * height)
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            if is_purple_outline_pixel(pixels[x, y]):
+                mask[row + x] = 1
+    min_width = max(1, parse_int_config(visual.get("purple_outline_min_box_width"), 18))
+    min_height = max(1, parse_int_config(visual.get("purple_outline_min_box_height"), 18))
+    min_pixels = max(1, parse_int_config(visual.get("purple_outline_min_pixels"), 24))
+    boxes: list[tuple[int, int, int, int]] = []
+    for x1, y1, x2, y2, area in connected_component_boxes(mask, width, height):
+        box_width = x2 - x1
+        box_height = y2 - y1
+        if area < min_pixels or box_width < min_width or box_height < min_height:
+            continue
+        boxes.append((left + x1, top + y1, left + x2, top + y2))
+    return len(boxes), boxes
+
+
+def add_visual_count_fact(
+    parsed: dict[str, Any],
+    *,
+    color: str,
+    count: int,
+    source: str,
+    boxes: list[tuple[int, int, int, int]] | None = None,
+) -> dict[str, Any]:
+    parsed.setdefault("constraints", {})
+    parsed["constraints"].setdefault(color, {"avg": None, "count": None, "grid": None, "min_count": None})
+    constraint = parsed["constraints"][color]
+    if int(count) > 0:
+        for field in ("avg", "grid"):
+            if constraint.get(field) == 0:
+                constraint[field] = None
+    constraint["count"] = int(count)
+    parsed.setdefault("parsed_facts", []).append(
+        {
+            "field": f"constraints.{color}.count",
+            "value": int(count),
+            "line": source,
+        }
+    )
+    parsed.setdefault("visual_detections", {})[f"{color}_outline_count"] = {
+        "count": int(count),
+        "boxes": [list(box) for box in boxes or []],
+    }
+    return parsed
+
+
 def observe_state_fast(config: dict[str, Any], config_path: Path, label: str) -> Observation:
     if bool(config.get("safety", {}).get("bring_window_to_front_on_observe", False)):
         bring_window_to_front(config)
@@ -486,8 +598,21 @@ def observe_state_fast(config: dict[str, Any], config_path: Path, label: str) ->
         home_crop = frame.crop(box)
         home_bid_text = rapidocr_once(ImageOps.grayscale(home_crop).convert("RGB"))
 
-    capture = CaptureResult(text=central_text, image_path=image_path, parsed=parse_central_info(central_text))
     round_no = parse_round_number(central_text) or parse_round_number(full_window_text)
+    parsed = parse_central_info(central_text)
+    visual = config.get("visual_detection", {})
+    purple_min_round = max(1, parse_int_config(visual.get("purple_outline_min_round"), 3))
+    if round_no is not None and int(round_no) >= purple_min_round and has_purple_outline_signal(central_text + "\n" + full_window_text):
+        purple_count, purple_boxes = detect_purple_outline_count(config, frame)
+        if purple_count is not None and purple_count > 0:
+            parsed = add_visual_count_fact(
+                parsed,
+                color="purple",
+                count=purple_count,
+                source=f"visual purple outline count={purple_count}",
+                boxes=purple_boxes,
+            )
+    capture = CaptureResult(text=central_text, image_path=image_path, parsed=parsed)
     parsed_facts = capture.parsed.get("parsed_facts") or []
     any_signal = bool(
         parsed_facts
@@ -561,11 +686,17 @@ def persist_last_submitted_price(
     config_path: Path,
     price: int | None,
     runtime_config: dict[str, Any] | None = None,
+    round_no: int | None = None,
 ) -> None:
     normalized_price = None if price is None else int(price)
+    normalized_round = None if normalized_price is None or round_no is None else int(round_no)
     if runtime_config is not None:
         runtime_config.setdefault("pricing", {})
         runtime_config["pricing"]["last_submitted_price"] = normalized_price
+        if normalized_price is None:
+            runtime_config["pricing"]["last_submitted_round"] = None
+        elif normalized_round is not None:
+            runtime_config["pricing"]["last_submitted_round"] = normalized_round
         if normalized_price is None:
             runtime_config["pricing"]["sticky_increment_step"] = None
         else:
@@ -585,6 +716,10 @@ def persist_last_submitted_price(
         return
     config.setdefault("pricing", {})
     config["pricing"]["last_submitted_price"] = normalized_price
+    if normalized_price is None:
+        config["pricing"]["last_submitted_round"] = None
+    elif normalized_round is not None:
+        config["pricing"]["last_submitted_round"] = normalized_round
     if normalized_price is None:
         config["pricing"]["sticky_increment_step"] = None
     else:
@@ -669,14 +804,54 @@ def bring_window_to_front(config: dict[str, Any]) -> None:
 
 def client_to_screen(config: dict[str, Any], point: dict[str, Any]) -> tuple[int, int]:
     info = find_window(config.get("window", {}))
-    reference = config.get("window", {}).get("reference_client_size", {})
-    raw_point = dict(point)
-    if str(raw_point.get("origin", "left_top")).strip().lower() in {"left_bottom", "bottom_left"}:
-        ref_height = int(reference.get("height") or info.height or 1080)
-        raw_point["y"] = ref_height - int(raw_point["y"])
-    x, y = scale_point(raw_point, reference, info.width, info.height)
+    x, y = scale_click_point_to_client(config, point, info.width, info.height)
     origin_x, origin_y = info.client_origin
     return origin_x + x, origin_y + y
+
+
+def scale_click_point_to_client(config: dict[str, Any], point: dict[str, Any], actual_width: int, actual_height: int) -> tuple[int, int]:
+    reference = config.get("window", {}).get("reference_client_size", {})
+    ref_height = int(reference.get("height") or actual_height or 1080)
+    raw_point = dict(point)
+    if str(raw_point.get("origin", "left_top")).strip().lower() in {"left_bottom", "bottom_left"}:
+        raw_point["y"] = ref_height - int(raw_point["y"])
+    return scale_point(raw_point, reference, actual_width, actual_height)
+
+
+def bid_confirm_target_looks_like_abandon(config: dict[str, Any]) -> bool:
+    safety = config.get("safety", {})
+    if not bool(safety.get("bid_confirm_abandon_guard", True)):
+        return False
+    point = config.get("clicks", {}).get("bid_confirm")
+    if not point:
+        return False
+    try:
+        frame, _info = capture_window_frame(config)
+    except Exception as exc:
+        log(f"warn: abandon guard capture failed: {exc}")
+        return False
+    x, y = scale_click_point_to_client(config, point, frame.width, frame.height)
+    radius = max(8, parse_int_config(safety.get("abandon_guard_radius_pixels"), 36))
+    left = max(0, int(x) - radius)
+    top = max(0, int(y) - radius)
+    right = min(frame.width, int(x) + radius + 1)
+    bottom = min(frame.height, int(y) + radius + 1)
+    if right <= left or bottom <= top:
+        return False
+    crop = frame.crop((left, top, right, bottom)).convert("RGB")
+    pixels = crop.getdata()
+    total = 0
+    danger = 0
+    for r, g, b in pixels:
+        total += 1
+        if r >= 125 and g <= 95 and b >= 75 and (r - g) >= 45 and (b - g) >= 20:
+            danger += 1
+    ratio = float(danger) / float(total or 1)
+    threshold = max(0.0, parse_float_config(safety.get("abandon_guard_red_ratio"), 0.08))
+    if ratio >= threshold:
+        log(f"bid confirm blocked: target looks like abandon button red_ratio={ratio:.3f} threshold={threshold:.3f}")
+        return True
+    return False
 
 
 def jitter_click_point(config: dict[str, Any], x: int, y: int, point: dict[str, Any] | None = None) -> tuple[int, int, int, int]:
@@ -749,15 +924,30 @@ def run_tool_sequence(config: dict[str, Any]) -> None:
     click_point(config, "tool_confirm")
 
 
-def input_bid(config: dict[str, Any], price: int) -> None:
+def input_bid(config: dict[str, Any], price: int) -> bool:
     log("bid sequence: open/input/confirm")
-    click_point(config, "bid_button")
-    click_point(config, "bid_input_box")
-    type_price(config, price)
-    if bool(config.get("safety", {}).get("confirm_after_type", True)):
-        click_point(config, "bid_confirm")
-        click_point(config, "tool_confirm")
-    sleep_interruptible(float(config.get("timing", {}).get("after_bid_confirm_wait_seconds", 1.0)))
+    safety = config.get("safety", {})
+    retry_count = max(1, parse_int_config(safety.get("bid_open_retry_count"), 2))
+    open_wait = max(0.0, parse_float_config(safety.get("bid_open_wait_seconds"), 0.35))
+    for attempt in range(1, retry_count + 1):
+        if retry_count > 1:
+            log(f"bid attempt {attempt}/{retry_count}")
+        click_point(config, "bid_button")
+        sleep_interruptible(open_wait)
+        click_point(config, "bid_input_box")
+        type_price(config, price)
+        if bool(safety.get("confirm_after_type", True)):
+            if bid_confirm_target_looks_like_abandon(config):
+                if attempt < retry_count:
+                    log("bid confirm skipped for this attempt; retry open/input")
+                    continue
+                log("bid submit skipped: confirm target still looks like abandon button")
+                return False
+            click_point(config, "bid_confirm")
+            click_point(config, "tool_confirm")
+        sleep_interruptible(float(config.get("timing", {}).get("after_bid_confirm_wait_seconds", 1.0)))
+        return True
+    return False
 
 
 def run_post_round_transition(config: dict[str, Any]) -> float:
@@ -802,6 +992,7 @@ def current_map_point(config: dict[str, Any], selected_map: str) -> dict[str, An
 
 def run_map_selection_transition(config: dict[str, Any], selected_map: str) -> float | None:
     maps = config.get("automation", {}).get("maps", {})
+    automation = config.get("automation", {})
     item = maps.get(str(selected_map), {})
     name = str(item.get("name") or selected_map)
     point = current_map_point(config, selected_map)
@@ -811,14 +1002,20 @@ def run_map_selection_transition(config: dict[str, Any], selected_map: str) -> f
     log(f"auction lobby detected: select map {selected_map}.{name}")
     bring_window_to_front(config)
     sleep_interruptible(1.0)
+    for click_name in item.get("pre_clicks") or []:
+        log(f"map pre-click: {click_name}")
+        click_point(config, str(click_name))
+        sleep_interruptible(1.0)
     sx, sy = client_to_screen(config, point)
     log(f"click map point: screen={sx},{sy}")
     if not bool(config.get("safety", {}).get("dry_run", False)):
         pyautogui.click(sx, sy)
     sleep_interruptible(float(config.get("timing", {}).get("click_pause_seconds", 0.12)))
-    sleep_interruptible(2.0)
-    click_point(config, "post_continue_confirm")
     confirm_at = time.monotonic()
+    if bool(automation.get("confirm_after_map_select", True)):
+        sleep_interruptible(2.0)
+        click_point(config, "post_continue_confirm")
+        confirm_at = time.monotonic()
     log("map selection transition complete; waiting for round OCR")
     return confirm_at
 
@@ -884,6 +1081,14 @@ def choose_bid_value_by_mode(config: dict[str, Any], result: dict[str, Any]) -> 
     return summary.get("avg_price"), "均衡=avg_price"
 
 
+def normalized_role(config: dict[str, Any]) -> str:
+    return str(config.get("advisor", {}).get("role", "")).strip().lower()
+
+
+def is_ahmad_role(config: dict[str, Any]) -> bool:
+    return normalized_role(config) in {"ahmad", "ahmed", "role2", "鑹惧搱杩堝痉"}
+
+
 def is_maria_role(config: dict[str, Any]) -> bool:
     role = str(config.get("advisor", {}).get("role", "")).strip().lower()
     return role in {"maria", "mary", "mariya", "maliya", "玛丽亚"}
@@ -937,6 +1142,329 @@ def choose_express_bid_value(config: dict[str, Any], parsed_patch: dict[str, Any
     express_factor = parse_float_config(automation.get("express_total_multiplier"), 0.0)
     final_price = choose_rounding(float(total_all) * float(express_factor), "floor_int")
     return float(final_price), f"快递跑刀=total_all({total_all})*单件价({express_factor:.4f})"
+
+
+def has_ahmad_color_grid_signal(advisor_input: dict[str, Any], color: str) -> bool:
+    color_info = ((advisor_input or {}).get("constraints") or {}).get(color) or {}
+    return color_info.get("avg") not in (None, "") or color_info.get("grid") not in (None, "")
+
+
+def direct_color_grid_from_advisor_input(advisor_input: dict[str, Any], color: str) -> float | None:
+    color_info = ((advisor_input or {}).get("constraints") or {}).get(color) or {}
+    try:
+        grid = float(color_info.get("grid"))
+    except Exception:
+        return None
+    return grid if grid > 0 else None
+
+
+def min_color_grid_from_result(result: dict[str, Any], color: str) -> float | None:
+    candidates = color_grid_candidates_from_result(result, color)
+    return min(candidates) if candidates else None
+
+
+def color_grid_candidates_from_result(result: dict[str, Any], color: str) -> list[float]:
+    summary = (result or {}).get("summary") or {}
+    summary_candidates = summary.get(f"{color}_grid_candidates")
+    if isinstance(summary_candidates, list):
+        candidates: list[float] = []
+        for grid in summary_candidates:
+            try:
+                grid_value = float(grid)
+            except Exception:
+                continue
+            if grid_value > 0:
+                candidates.append(grid_value)
+        if candidates:
+            return sorted(set(candidates))
+
+    candidates: list[float] = []
+    solved_color = ((result or {}).get("solved") or {}).get(color) or {}
+    pair_map = solved_color.get("pair_map") or {}
+    for grids in pair_map.values():
+        if not isinstance(grids, list):
+            continue
+        for grid in grids:
+            try:
+                grid_value = float(grid)
+            except Exception:
+                continue
+            if grid_value > 0:
+                candidates.append(grid_value)
+    for combo in (result or {}).get("combos_preview") or []:
+        color_range = ((combo or {}).get("ranges") or {}).get(color)
+        if not color_range:
+            continue
+        try:
+            grid_value = float(color_range[0])
+        except Exception:
+            continue
+        if grid_value > 0:
+            candidates.append(grid_value)
+    return sorted(set(candidates))
+
+
+def is_ahmad_warehouse_gold_table_enabled(config: dict[str, Any]) -> bool:
+    automation = config.get("automation", {})
+    if not bool(automation.get("ahmad_warehouse_gold_value_table_enabled", False)):
+        return False
+    return is_ahmad_warehouse_map(config)
+
+
+def is_ahmad_warehouse_map(config: dict[str, Any]) -> bool:
+    automation = config.get("automation", {})
+    selected_map = str(automation.get("selected_map") or automation.get("default_map") or "")
+    enabled_maps = {str(item) for item in automation.get("ahmad_warehouse_map_ids", ["2"])}
+    return selected_map in enabled_maps
+
+
+def is_ahmad_warehouse_round_schedule_enabled(config: dict[str, Any]) -> bool:
+    automation = config.get("automation", {})
+    return (
+        is_ahmad_role(config)
+        and is_ahmad_warehouse_map(config)
+        and bool(automation.get("ahmad_gold_grid_bonus_enabled", False))
+        and bool(automation.get("ahmad_gold_grid_scaled_scheme_enabled", False))
+    )
+
+
+def ahmad_gold_value_table(config: dict[str, Any]) -> dict[int, int]:
+    table = config.get("automation", {}).get("ahmad_gold_grid_value_table") or {}
+    result: dict[int, int] = {}
+    for key, value in table.items():
+        try:
+            grid = int(float(key))
+            price = int(float(value))
+        except Exception:
+            continue
+        if grid > 0 and price > 0:
+            result[grid] = price
+    return result
+
+
+def ahmad_color_grid_bonus_value(
+    config: dict[str, Any],
+    color: str,
+    result: dict[str, Any],
+    min_grid: float,
+    unit_price: int,
+) -> tuple[int, str]:
+    if color != "gold" or not is_ahmad_warehouse_gold_table_enabled(config):
+        return choose_rounding(float(min_grid) * float(unit_price), "floor_int"), "unit"
+
+    table = ahmad_gold_value_table(config)
+    table_candidates: list[tuple[int, int]] = []
+    for grid_value in color_grid_candidates_from_result(result, color):
+        grid = int(round(float(grid_value)))
+        if abs(float(grid_value) - grid) > 1e-9:
+            continue
+        if grid in table:
+            table_candidates.append((grid, int(table[grid])))
+    if table_candidates:
+        grid, price = min(table_candidates, key=lambda item: item[1])
+        return int(price), f"warehouse_table_grid={grid}"
+    direct_grid = int(round(float(min_grid)))
+    if abs(float(min_grid) - direct_grid) <= 1e-9 and direct_grid in table:
+        return int(table[direct_grid]), f"warehouse_table_grid={direct_grid}"
+    return choose_rounding(float(min_grid) * float(unit_price), "floor_int"), "unit_fallback"
+
+
+def cache_ahmad_color_grid_bonus(
+    config: dict[str, Any],
+    color: str,
+    min_grid: float,
+    unit_price: int,
+    result: dict[str, Any],
+) -> int:
+    pricing = config.setdefault("pricing", {})
+    bonus, value_source = ahmad_color_grid_bonus_value(config, color, result, min_grid, unit_price)
+    if bonus <= 0:
+        return 0
+    pricing[f"ahmad_{color}_grid_bonus_price"] = int(bonus)
+    pricing[f"ahmad_{color}_grid_bonus_min_grid"] = float(min_grid)
+    pricing[f"ahmad_{color}_grid_bonus_unit_price"] = int(unit_price)
+    pricing[f"ahmad_{color}_grid_bonus_value_source"] = str(value_source)
+    return int(bonus)
+
+
+def cached_ahmad_color_grid_bonus(config: dict[str, Any], color: str) -> tuple[int, float | None, str | None]:
+    pricing = config.setdefault("pricing", {})
+    try:
+        bonus = int(pricing.get(f"ahmad_{color}_grid_bonus_price") or 0)
+    except Exception:
+        bonus = 0
+    try:
+        min_grid = float(pricing.get(f"ahmad_{color}_grid_bonus_min_grid"))
+    except Exception:
+        min_grid = None
+    source = pricing.get(f"ahmad_{color}_grid_bonus_value_source")
+    return max(0, bonus), min_grid, (str(source) if source not in (None, "") else None)
+
+
+def ahmad_gold_grid_bonus_multiplier(config: dict[str, Any], round_no: int, start_round: int) -> tuple[float, str]:
+    automation = config.get("automation", {})
+    if not bool(automation.get("ahmad_gold_grid_scaled_scheme_enabled", False)):
+        return 1.0, "fixed_100pct"
+    relative_round = max(0, int(round_no) - int(start_round))
+    if is_ahmad_warehouse_round_schedule_enabled(config):
+        if relative_round <= 0:
+            return 0.8, "scaled_80pct"
+        return 0.8, "scaled_80pct_final_schedule"
+    if relative_round <= 0:
+        return 0.8, "scaled_80pct"
+    if relative_round == 1:
+        return 0.8 * 1.1, "scaled_80pct_x1.1"
+    return 0.8 * 1.1 * 1.1, "scaled_80pct_x1.1_x1.1"
+
+
+def compute_ahmad_gold_grid_bonus(
+    config: dict[str, Any],
+    round_no: int,
+    advisor_input: dict[str, Any],
+    result: dict[str, Any],
+) -> tuple[int, str | None, bool]:
+    automation = config.get("automation", {})
+    if not bool(automation.get("ahmad_gold_grid_bonus_enabled", False)):
+        return 0, None, False
+    if not is_ahmad_role(config):
+        return 0, None, False
+    gold_unit_price = max(0, parse_int_config(automation.get("ahmad_gold_grid_bonus_unit_price"), 10000))
+    purple_unit_price = max(0, parse_int_config(automation.get("ahmad_purple_grid_bonus_unit_price"), 2000))
+    if gold_unit_price <= 0 and purple_unit_price <= 0:
+        return 0, None, False
+
+    color_parts: dict[str, dict[str, Any]] = {}
+    base_bonus = 0
+    for color in ("gold", "purple"):
+        unit_price = gold_unit_price if color == "gold" else purple_unit_price
+        if unit_price <= 0:
+            continue
+        source = "cache"
+        value_source = None
+        min_grid: float | None = None
+        bonus = 0
+        if has_ahmad_color_grid_signal(advisor_input, color):
+            min_grid = min_color_grid_from_result(result, color)
+            if min_grid is None:
+                min_grid = direct_color_grid_from_advisor_input(advisor_input, color)
+            if min_grid is not None and min_grid > 0:
+                bonus = cache_ahmad_color_grid_bonus(config, color, min_grid, unit_price, result)
+                _, _, value_source = cached_ahmad_color_grid_bonus(config, color)
+                if bonus > 0:
+                    source = "ocr"
+        if bonus <= 0:
+            bonus, min_grid, value_source = cached_ahmad_color_grid_bonus(config, color)
+        if bonus > 0:
+            color_parts[color] = {
+                "source": source,
+                "value_source": value_source,
+                "min_grid": min_grid,
+                "unit_price": unit_price,
+                "bonus": int(bonus),
+            }
+            base_bonus += int(bonus)
+
+    if base_bonus <= 0:
+        return 0, None, False
+
+    start_round = max(1, parse_int_config(automation.get("ahmad_gold_grid_bonus_start_round"), 3))
+    applied = int(round_no) >= start_round
+    multiplier, scheme_label = ahmad_gold_grid_bonus_multiplier(config, round_no, start_round)
+    final_bonus = choose_rounding(float(base_bonus) * multiplier, "floor_int")
+    if final_bonus <= 0:
+        return 0, None, False
+    part_labels = []
+    for color in ("gold", "purple"):
+        part = color_parts.get(color)
+        if not part:
+            continue
+        grid = part.get("min_grid")
+        grid_label = f"{grid:g}" if isinstance(grid, (int, float)) else "unknown"
+        value_source = part.get("value_source") or "unknown"
+        part_labels.append(
+            f"{color}[source={part.get('source')} value={value_source} min_grid={grid_label} unit={part.get('unit_price')} bonus={part.get('bonus')}]"
+        )
+    reason = (
+        f"ahmad_gold_purple_grid_bonus {'; '.join(part_labels)} "
+        f"base=+{base_bonus} scheme={scheme_label} "
+        f"multiplier={multiplier:.3f} -> +{final_bonus}"
+    )
+    if not applied:
+        reason += f" pending_until_round={start_round}"
+    return int(final_bonus), reason, applied
+
+
+def ahmad_warehouse_round_schedule_multiplier(round_no: int) -> tuple[float | None, str | None]:
+    round_index = int(round_no)
+    if round_index == 4:
+        return 1.1 * 1.1, "round4=round3_final*1.1*1.1"
+    if round_index == 5:
+        return 1.03, "round5=round4_final*1.03"
+    return None, None
+
+
+def apply_ahmad_warehouse_round_schedule(
+    config: dict[str, Any],
+    round_no: int,
+    final_price: int,
+    rounding: str,
+) -> tuple[int, str | None]:
+    if not is_ahmad_warehouse_round_schedule_enabled(config):
+        return int(final_price), None
+
+    multiplier, label = ahmad_warehouse_round_schedule_multiplier(round_no)
+    if multiplier is None or label is None:
+        return int(final_price), None
+
+    pricing = config.get("pricing", {})
+    previous_price_raw = pricing.get("last_submitted_price")
+    try:
+        previous_price = int(previous_price_raw) if previous_price_raw not in (None, "") else None
+    except Exception:
+        previous_price = None
+    if previous_price is None or previous_price <= 0:
+        return int(final_price), f"ahmad_warehouse_round_schedule {label} skipped: missing previous final price"
+
+    previous_round_raw = pricing.get("last_submitted_round")
+    try:
+        previous_round = int(previous_round_raw) if previous_round_raw not in (None, "") else None
+    except Exception:
+        previous_round = None
+    expected_previous_round = int(round_no) - 1
+    if previous_round is not None and previous_round != expected_previous_round:
+        return (
+            int(final_price),
+            f"ahmad_warehouse_round_schedule {label} skipped: previous_round={previous_round} expected={expected_previous_round}",
+        )
+
+    scheduled_price = choose_rounding(float(previous_price) * float(multiplier), rounding)
+    if scheduled_price <= 0:
+        return int(final_price), f"ahmad_warehouse_round_schedule {label} skipped: scheduled_price={scheduled_price}"
+
+    previous_label = f"round{previous_round}" if previous_round is not None else "previous"
+    return (
+        int(scheduled_price),
+        (
+            f"ahmad_warehouse_round_schedule {label} "
+            f"{previous_label}_price={previous_price} multiplier={multiplier:.3f} "
+            f"computed_input={int(final_price)} -> {scheduled_price}"
+        ),
+    )
+
+
+def reset_runtime_auction_state(config: dict[str, Any]) -> None:
+    pricing = config.setdefault("pricing", {})
+    for key in (
+        "ahmad_gold_grid_bonus_price",
+        "ahmad_gold_grid_bonus_min_grid",
+        "ahmad_gold_grid_bonus_unit_price",
+        "ahmad_gold_grid_bonus_value_source",
+        "ahmad_purple_grid_bonus_price",
+        "ahmad_purple_grid_bonus_min_grid",
+        "ahmad_purple_grid_bonus_unit_price",
+        "ahmad_purple_grid_bonus_value_source",
+    ):
+        pricing.pop(key, None)
 
 
 def apply_bid_cap(config: dict[str, Any], final_price: int, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -1014,6 +1542,12 @@ def apply_sticky_increment(config: dict[str, Any], final_price: int) -> tuple[in
     if int(final_price) >= minimum_price:
         return int(final_price), None
     return int(minimum_price), f"sticky_increment linear previous={previous} step={step} -> {minimum_price}"
+
+
+def should_apply_sticky_increment(config: dict[str, Any]) -> bool:
+    if is_ahmad_role(config):
+        return False
+    return True
 
 
 def compute_bid_price(
@@ -1110,22 +1644,35 @@ def compute_bid_price(
         payload["fallback"] = True
         payload["reason"] = f"non-positive final price: {price}"
         return fallback, payload
+    bonus_price, bonus_reason, bonus_applied = compute_ahmad_gold_grid_bonus(
+        config,
+        round_no,
+        advisor_input,
+        result,
+    )
+    if bonus_applied:
+        price += bonus_price
     final_price, low_price_reason = apply_observed_low_price_floor(result, price, rounding)
-    final_price, sticky_reason = apply_sticky_increment(config, final_price)
+    final_price, round_schedule_reason = apply_ahmad_warehouse_round_schedule(config, round_no, final_price, rounding)
+    sticky_reason = None
+    if should_apply_sticky_increment(config):
+        final_price, sticky_reason = apply_sticky_increment(config, final_price)
     final_price, payload = apply_bid_cap(config, final_price, payload)
     final_price, payload = apply_safe_guard(config, final_price, payload)
     if payload.get("fallback"):
         return int(final_price), payload
-    if low_price_reason:
-        if mode == "express":
-            payload["reason"] = f"{source_reason} -> input={price}; {low_price_reason}; final={final_price}"
-        else:
-            payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={price}; {low_price_reason}; final={final_price}"
+    if mode == "express":
+        payload["reason"] = f"{source_reason} -> input={price}"
     else:
-        if mode == "express":
-            payload["reason"] = f"{source_reason} -> input={final_price}"
-        else:
-            payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={final_price}"
+        payload["reason"] = f"{source_reason}: {value:.4f}w * {multiplier} -> input={price}"
+    if low_price_reason:
+        payload["reason"] += f"; {low_price_reason}"
+    if round_schedule_reason:
+        payload["reason"] += f"; {round_schedule_reason}"
+    if final_price != price or low_price_reason or round_schedule_reason:
+        payload["reason"] += f"; final={final_price}"
+    if bonus_reason:
+        payload["reason"] += f"; {bonus_reason}"
     if sticky_reason:
         payload["reason"] += f"; {sticky_reason}"
     bid_cap_info = payload.get("bid_cap") or {}
@@ -1233,8 +1780,10 @@ def handle_round(
     if details.get("skip_submit"):
         log(f"bid skipped: {details.get('reason')}")
         return knowledge_patch
-    input_bid(config, price)
-    persist_last_submitted_price(config_path, price, config)
+    if not input_bid(config, price):
+        log("bid not submitted: guarded against abandon click")
+        return knowledge_patch
+    persist_last_submitted_price(config_path, price, config, round_no=round_no)
     return knowledge_patch
 
 
@@ -1259,6 +1808,7 @@ def handle_end_transition(
     log(f"{source}: end prompt detected")
     confirm_at = run_post_round_transition(config)
     handled_rounds.clear()
+    reset_runtime_auction_state(config)
     return time.monotonic(), confirm_at
 
 
@@ -1266,6 +1816,7 @@ def run_loop(config_path: Path) -> None:
     config = load_json(config_path)
     price_config = load_price_config(config, config_path)
     persist_last_submitted_price(config_path, None, config)
+    reset_runtime_auction_state(config)
     selected_map = str(config.get("automation", {}).get("selected_map") or config.get("automation", {}).get("default_map", "4"))
     max_runs = int(config.get("automation", {}).get("selected_runs") or config.get("automation", {}).get("default_runs", 1))
     pyautogui.FAILSAFE = bool(config.get("safety", {}).get("failsafe", True))
@@ -1358,6 +1909,7 @@ def run_loop(config_path: Path) -> None:
                     handled_rounds.clear()
                     knowledge_patch = None
                     persist_last_submitted_price(config_path, None, config)
+                    reset_runtime_auction_state(config)
                     last_lobby_at = time.monotonic()
                 else:
                     log(f"loop {loop_index}: auction lobby ignored by debounce")
@@ -1369,6 +1921,7 @@ def run_loop(config_path: Path) -> None:
                     run_home_bid_button_transition(config)
                     knowledge_patch = None
                     persist_last_submitted_price(config_path, None, config)
+                    reset_runtime_auction_state(config)
                     last_home_bid_at = time.monotonic()
                 else:
                     log(f"loop {loop_index}: home bid button ignored by debounce")
@@ -1385,6 +1938,7 @@ def run_loop(config_path: Path) -> None:
                 handled_rounds.clear()
                 knowledge_patch = apply_observation_memory(observation, None)
                 persist_last_submitted_price(config_path, None, config)
+                reset_runtime_auction_state(config)
 
             if round_no in handled_rounds:
                 log(f"loop {loop_index}: round {round_no} already handled; waiting")
@@ -1433,6 +1987,7 @@ def print_click_positions(config_path: Path) -> None:
     info = find_window(config.get("window", {}))
     log(f"window hwnd={info.hwnd} client_origin={info.client_origin} client_size={info.width}x{info.height}")
     for name in (
+        "map_page_next",
         "tool_button",
         "leftmost_tool",
         "tool_confirm",

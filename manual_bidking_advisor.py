@@ -588,6 +588,18 @@ def build_summary(
         [combo["total_grid_range"][0] for combo in combos if "total_grid_range" in combo]
         + [combo["total_grid_range"][1] for combo in combos if "total_grid_range" in combo]
     )
+    gold_grid_candidates = uniq_sorted(
+        grid
+        for combo in combos
+        if combo.get("ranges", {}).get("gold")
+        for grid in range(int(combo["ranges"]["gold"][0]), int(combo["ranges"]["gold"][1]) + 1)
+    )
+    purple_grid_candidates = uniq_sorted(
+        grid
+        for combo in combos
+        if combo.get("ranges", {}).get("purple")
+        for grid in range(int(combo["ranges"]["purple"][0]), int(combo["ranges"]["purple"][1]) + 1)
+    )
     return {
         "combo_count": len(combos),
         "conservative_floor": conservative_floor,
@@ -604,6 +616,10 @@ def build_summary(
         "observed_low_price": as_non_neg_float(data.get("observed_low_price")),
         "wg_candidates": wg_candidates,
         "total_grid_candidates": total_grid_candidates,
+        "gold_grid_min": min(gold_grid_candidates) if gold_grid_candidates else None,
+        "gold_grid_candidates": gold_grid_candidates,
+        "purple_grid_min": min(purple_grid_candidates) if purple_grid_candidates else None,
+        "purple_grid_candidates": purple_grid_candidates,
         "grid_prices": grid_prices,
     }
 

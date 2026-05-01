@@ -6,7 +6,12 @@
     "bring_window_to_front_on_observe": false,
     "move_pause_seconds": 0.08,
     "click_jitter_pixels": 4,
-    "confirm_after_type": true
+    "confirm_after_type": true,
+    "bid_confirm_abandon_guard": true,
+    "bid_open_retry_count": 2,
+    "bid_open_wait_seconds": 0.35,
+    "abandon_guard_radius_pixels": 36,
+    "abandon_guard_red_ratio": 0.08
   },
   "window": {
     "title_keyword": "BidKing",
@@ -51,6 +56,19 @@
       }
     ]
   },
+  "visual_detection": {
+    "purple_outline_count_enabled": true,
+    "purple_outline_min_round": 3,
+    "loot_panel_region": {
+      "left": 1280,
+      "top": 90,
+      "width": 620,
+      "height": 850
+    },
+    "purple_outline_min_box_width": 18,
+    "purple_outline_min_box_height": 18,
+    "purple_outline_min_pixels": 24
+  },
   "ocr": {
     "provider": "rapidocr",
     "endpoint": "",
@@ -77,15 +95,17 @@
     "rounding": "floor_int",
     "fallback_bid_price": 30000,
     "last_submitted_price": null,
+    "last_submitted_round": null,
     "min_useful_facts": 1
   },
   "automation": {
     "selected_mode": "express",
     "tool_rounds": [],
-    "default_map": "1",
+    "default_map": "2",
     "default_runs": 1,
     "unknown_escape_cooldown_seconds": 2.0,
     "post_confirm_escape_block_seconds": 30.0,
+    "confirm_after_map_select": false,
     "maps": {
       "1": {
         "name": "快递盲盒堆",
@@ -97,10 +117,13 @@
       },
       "2": {
         "name": "废弃仓库",
+        "pre_clicks": [
+          "map_page_next"
+        ],
         "point": {
           "origin": "left_bottom",
-          "x": 922,
-          "y": 764
+          "x": 575,
+          "y": 786
         }
       },
       "3": {
@@ -115,36 +138,36 @@
         "name": "沉船密封舱",
         "point": {
           "origin": "left_bottom",
-          "x": 1634,
-          "y": 413
+          "x": 1832,
+          "y": 421
         }
       },
       "5": {
         "name": "航运集装箱",
         "point": {
           "origin": "left_bottom",
-          "x": 557,
-          "y": 400
+          "x": 650,
+          "y": 345
         }
       },
       "6": {
         "name": "空置别墅",
         "point": {
           "origin": "left_bottom",
-          "x": 1202,
-          "y": 440
+          "x": 1544,
+          "y": 364
         }
       },
       "7": {
         "name": "幽静别墅",
         "point": {
           "origin": "left_bottom",
-          "x": 1489,
-          "y": 240
+          "x": 1745,
+          "y": 239
         }
       }
     },
-    "selected_map": "1",
+    "selected_map": "2",
     "selected_runs": 5,
     "selected_risk": "avg_price",
     "custom_risk_factor": 0.0,
@@ -152,6 +175,29 @@
     "safe_guard_max_increase_ratio": 0.5,
     "bid_cap_price": 0,
     "sticky_increment_ratio": 0.03,
+    "ahmad_gold_grid_bonus_enabled": true,
+    "ahmad_gold_grid_scaled_scheme_enabled": true,
+    "ahmad_gold_grid_bonus_start_round": 3,
+    "ahmad_gold_grid_bonus_unit_price": 10000,
+    "ahmad_purple_grid_bonus_unit_price": 2000,
+    "ahmad_warehouse_gold_value_table_enabled": true,
+    "ahmad_warehouse_map_ids": [
+      "2"
+    ],
+    "ahmad_gold_grid_value_table": {
+      "1": 15000,
+      "2": 27000,
+      "3": 43000,
+      "4": 35000,
+      "5": 39000,
+      "6": 50000,
+      "8": 60000,
+      "9": 70000,
+      "10": 68000,
+      "12": 85000,
+      "15": 97382,
+      "16": 199900
+    },
     "maria_round_bid_scheme_enabled": true,
     "express_total_multiplier": 1009.0
   },
@@ -169,6 +215,11 @@
     "reward_continue_debounce_seconds": 1.0
   },
   "clicks": {
+    "map_page_next": {
+      "origin": "left_bottom",
+      "x": 1824,
+      "y": 82
+    },
     "tool_button": {
       "x": 630,
       "y": 970
@@ -210,13 +261,13 @@
     },
     "post_continue_action": {
       "origin": "left_bottom",
-      "x": 1634,
-      "y": 413
+      "x": 1185,
+      "y": 778
     },
     "post_continue_confirm": {
       "origin": "left_bottom",
-      "x": 1658,
-      "y": 85
+      "x": 1815,
+      "y": 81
     },
     "home_bid_button": {
       "origin": "left_bottom",
