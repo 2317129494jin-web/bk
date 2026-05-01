@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import re
 import sys
 import threading
@@ -452,7 +453,8 @@ def scaled_region_box(region: dict[str, Any], config: dict[str, Any], image_widt
 
 
 def observe_state_fast(config: dict[str, Any], config_path: Path, label: str) -> Observation:
-    bring_window_to_front(config)
+    if bool(config.get("safety", {}).get("bring_window_to_front_on_observe", False)):
+        bring_window_to_front(config)
     frame, _info = capture_window_frame(config)
     runs_dir = ensure_output_dir(config, config_path)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -677,16 +679,38 @@ def client_to_screen(config: dict[str, Any], point: dict[str, Any]) -> tuple[int
     return origin_x + x, origin_y + y
 
 
+def jitter_click_point(config: dict[str, Any], x: int, y: int, point: dict[str, Any] | None = None) -> tuple[int, int, int, int]:
+    safety = config.get("safety", {})
+    raw_radius = (point or {}).get("jitter_pixels", safety.get("click_jitter_pixels", 0))
+    try:
+        radius = max(0, int(float(raw_radius or 0)))
+    except Exception:
+        radius = 0
+    if radius <= 0:
+        return int(x), int(y), 0, 0
+
+    dx = random.randint(-radius, radius)
+    dy = random.randint(-radius, radius)
+    left, top, right, bottom = virtual_screen_rect()
+    jittered_x = min(max(left, int(x) + dx), right - 1)
+    jittered_y = min(max(top, int(y) + dy), bottom - 1)
+    return int(jittered_x), int(jittered_y), int(jittered_x) - int(x), int(jittered_y) - int(y)
+
+
 def click_point(config: dict[str, Any], name: str, repeat: int = 1, pause: float | None = None) -> None:
     bring_window_to_front(config)
     point = config["clicks"][name]
     timing = config.get("timing", {})
     pause_value = float(timing.get("click_pause_seconds", 0.12) if pause is None else pause)
     dry_run = bool(config.get("safety", {}).get("dry_run", False))
-    x, y = client_to_screen(config, point)
+    base_x, base_y = client_to_screen(config, point)
     for index in range(repeat):
         ensure_not_stopped()
-        log(f"click {name} #{index + 1}: screen={x},{y}")
+        x, y, dx, dy = jitter_click_point(config, base_x, base_y, point)
+        if dx or dy:
+            log(f"click {name} #{index + 1}: screen={x},{y} jitter={dx},{dy}")
+        else:
+            log(f"click {name} #{index + 1}: screen={x},{y}")
         if not dry_run:
             pyautogui.click(x, y)
         sleep_interruptible(pause_value)
@@ -821,6 +845,13 @@ def parse_int_config(value: Any, default: int) -> int:
         return int(default)
 
 
+def current_time_random_extra(max_seconds: Any) -> float:
+    max_extra = max(0.0, parse_float_config(max_seconds, 0.0))
+    if max_extra <= 0:
+        return 0.0
+    return random.Random(time.time_ns()).random() * max_extra
+
+
 def apply_observed_low_price_floor(result: dict[str, Any], price: int, rounding: str) -> tuple[int, str | None]:
     summary = (result or {}).get("summary") or {}
     observed_low_price = summary.get("observed_low_price")
@@ -856,6 +887,29 @@ def choose_bid_value_by_mode(config: dict[str, Any], result: dict[str, Any]) -> 
 def is_maria_role(config: dict[str, Any]) -> bool:
     role = str(config.get("advisor", {}).get("role", "")).strip().lower()
     return role in {"maria", "mary", "mariya", "maliya", "玛丽亚"}
+
+
+def maria_round_bid_scheme_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("automation", {}).get("maria_round_bid_scheme_enabled", False))
+
+
+def maria_round_bid_value(base_price: float, round_no: int) -> tuple[float, str]:
+    round_index = max(1, min(5, int(round_no)))
+    multipliers = {
+        1: 0.85,
+        2: 0.85,
+        3: 0.85 * 1.33,
+        4: 0.85 * 1.33 * 1.1 * 1.1,
+        5: 0.85 * 1.33 * 1.1 * 1.1 * 1.03,
+    }
+    labels = {
+        1: "第1回合=基础价*0.85",
+        2: "第2回合=基础价*0.85",
+        3: "第3回合=基础价*0.85*1.33",
+        4: "第4回合=基础价*0.85*1.33*1.1*1.1",
+        5: "第5回合=基础价*0.85*1.33*1.1*1.1*1.03",
+    }
+    return float(base_price) * multipliers[round_index], labels[round_index]
 
 
 def choose_maria_bid_value(parsed_patch: dict[str, Any]) -> tuple[float | None, str]:
@@ -994,12 +1048,20 @@ def compute_bid_price(
             payload["reason"] = f"missing bid value: {source_reason}"
             return fallback, payload
         payload["source_value"] = value
-        price = choose_rounding(float(value), rounding)
+        sticky_reason = None
+        if maria_round_bid_scheme_enabled(config):
+            adjusted_value, schedule_reason = maria_round_bid_value(float(value), round_no)
+            price = choose_rounding(adjusted_value, rounding)
+            source_reason = f"{source_reason}; 玛丽亚专用方案 {schedule_reason}"
+        else:
+            price = choose_rounding(float(value), rounding)
         if price <= 0:
             payload["fallback"] = True
             payload["reason"] = f"non-positive final price: {price}"
             return fallback, payload
-        final_price, sticky_reason = apply_sticky_increment(config, price)
+        final_price = price
+        if not maria_round_bid_scheme_enabled(config):
+            final_price, sticky_reason = apply_sticky_increment(config, price)
         final_price, payload = apply_bid_cap(config, final_price, payload)
         final_price, payload = apply_safe_guard(config, final_price, payload)
         if not payload.get("fallback") and not payload.get("skip_submit"):
@@ -1072,12 +1134,22 @@ def compute_bid_price(
     return int(final_price), payload
 
 
-def wait_with_observation(config: dict[str, Any], config_path: Path, seconds: float, message: str) -> None:
+def wait_with_observation(
+    config: dict[str, Any],
+    config_path: Path,
+    seconds: float,
+    message: str,
+    *,
+    observe: bool = True,
+) -> None:
     ensure_not_stopped()
     seconds = max(0.0, float(seconds))
     if seconds <= 0:
         return
     log(f"{message}: wait {seconds:g}s")
+    if not observe:
+        sleep_interruptible(seconds)
+        return
     end = time.monotonic() + seconds
     poll_seconds = max(0.2, float(config.get("timing", {}).get("poll_seconds", 2.0)))
     while True:
@@ -1098,14 +1170,22 @@ def handle_round(
     knowledge_patch: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     ensure_not_stopped()
-    round_wait = float(config.get("timing", {}).get("round_detect_wait_seconds", 15.0))
+    timing = config.get("timing", {})
     if int(round_no) == 1:
-        round_wait += float(config.get("timing", {}).get("round1_extra_wait_seconds", 0.0))
+        round_wait = float(timing.get("round_detect_wait_seconds", 15.0))
+        round_wait += float(timing.get("round1_extra_wait_seconds", 0.0))
+    else:
+        round_wait = float(timing.get("round2_5_detect_wait_seconds", 2.0))
+    random_extra = current_time_random_extra(timing.get("round_detect_random_extra_max_seconds", 5.0))
+    if random_extra > 0:
+        round_wait += random_extra
+        log(f"round {round_no}: random bid wait extra={random_extra:.2f}s")
     wait_with_observation(
         config,
         config_path,
         round_wait,
         f"round {round_no} detected",
+        observe=bool(timing.get("observe_during_round_wait", False)),
     )
     tool_rounds = {int(item) for item in config.get("automation", {}).get("tool_rounds", [1, 2])}
     if int(round_no) in tool_rounds:
@@ -1136,7 +1216,7 @@ def handle_round(
         )
     if bool(config.get("debug", {}).get("print_ocr_snippet", False)):
         log("ocr snippet: " + compact_text(observation.capture.text)[:160])
-    if bool(config.get("debug", {}).get("print_round_debug", True)):
+    if bool(config.get("debug", {}).get("print_round_debug", False)):
         log(f"debug raw ocr: {repr(observation.capture.text[:300])}")
         log(f"debug advisor input keys: {sorted(advisor_input.keys())}")
         log(f"debug parsed facts: {len((effective_patch or {}).get('parsed_facts') or [])}")

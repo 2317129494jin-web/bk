@@ -3,7 +3,9 @@
     "dry_run": false,
     "failsafe": true,
     "bring_window_to_front": true,
+    "bring_window_to_front_on_observe": false,
     "move_pause_seconds": 0.08,
+    "click_jitter_pixels": 4,
     "confirm_after_type": true
   },
   "window": {
@@ -89,8 +91,8 @@
         "name": "快递盲盒堆",
         "point": {
           "origin": "left_bottom",
-          "x": 464,
-          "y": 710
+          "x": 680,
+          "y": 690
         }
       },
       "2": {
@@ -150,12 +152,16 @@
     "safe_guard_max_increase_ratio": 0.5,
     "bid_cap_price": 0,
     "sticky_increment_ratio": 0.03,
+    "maria_round_bid_scheme_enabled": true,
     "express_total_multiplier": 1009.0
   },
   "timing": {
     "poll_seconds": 0.5,
     "round_detect_wait_seconds": 7.0,
+    "round2_5_detect_wait_seconds": 2.0,
+    "round_detect_random_extra_max_seconds": 0.0,
     "round1_extra_wait_seconds": 3.0,
+    "observe_during_round_wait": false,
     "tool_after_wait_seconds": 3.0,
     "click_pause_seconds": 0.12,
     "after_bid_confirm_wait_seconds": 1.0,
@@ -228,7 +234,7 @@
     "save_ocr_text": false,
     "print_ocr_snippet": false,
     "save_round_debug": true,
-    "print_round_debug": true,
+    "print_round_debug": false,
     "runs_dir": "runs"
   }
 }

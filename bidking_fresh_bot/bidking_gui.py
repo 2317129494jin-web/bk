@@ -74,6 +74,7 @@ class BidKingApp:
         self.safe_guard_ratio_var = tk.StringVar()
         self.bid_cap_price_var = tk.StringVar()
         self.sticky_increment_var = tk.StringVar()
+        self.maria_round_bid_scheme_enabled_var = tk.BooleanVar()
         self.calc_vars: dict[str, tk.StringVar] = {}
         self.weight_summary_var = tk.StringVar()
 
@@ -186,6 +187,11 @@ class BidKingApp:
         ttk.Entry(row5, textvariable=self.fallback_price_var, width=10).pack(side="left", padx=(8, 12))
         ttk.Label(row5, text="识别失败或被安全开关拦截时使用").pack(side="left")
 
+        row6 = ttk.Frame(extra_box)
+        row6.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(row6, text="玛丽亚专用出价方案", variable=self.maria_round_bid_scheme_enabled_var).pack(side="left")
+        ttk.Label(row6, text="仅角色为玛丽亚时生效：1/2回合85%，3回合x1.33，4回合x1.1x1.1，5回合x1.03").pack(side="left", padx=(12, 0))
+
         tip_box = ttk.LabelFrame(main, text="7. 道具提示", padding=10)
         tip_box.pack(fill="x", pady=(10, 0))
         ttk.Label(tip_box, text="维克托：优先带紫色数量、橙色均格；有钱可以带橙色扫描").pack(anchor="w")
@@ -282,6 +288,7 @@ class BidKingApp:
         self.safe_guard_ratio_var.set(str(self.config.get("automation", {}).get("safe_guard_max_increase_ratio", 0.5)))
         self.bid_cap_price_var.set(str(self.config.get("automation", {}).get("bid_cap_price", 0)))
         self.sticky_increment_var.set(str(self.config.get("automation", {}).get("sticky_increment_ratio", 0.03)))
+        self.maria_round_bid_scheme_enabled_var.set(bool(self.config.get("automation", {}).get("maria_round_bid_scheme_enabled", True)))
         tool_rounds = {int(item) for item in self.config.get("automation", {}).get("tool_rounds", [1, 2])}
         for round_no, var in self.tool_round_vars.items():
             var.set(round_no in tool_rounds)
@@ -328,6 +335,7 @@ class BidKingApp:
         self.config["automation"]["safe_guard_max_increase_ratio"] = safe_guard_ratio
         self.config["automation"]["bid_cap_price"] = bid_cap_price
         self.config["automation"]["sticky_increment_ratio"] = sticky_increment_ratio
+        self.config["automation"]["maria_round_bid_scheme_enabled"] = bool(self.maria_round_bid_scheme_enabled_var.get())
         self.config["automation"]["tool_rounds"] = selected_tool_rounds
         self.config["pricing"]["fallback_bid_price"] = fallback_bid_price
         self.config.setdefault("advisor", {})["role"] = selected_role
