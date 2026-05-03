@@ -11,7 +11,13 @@
     "bid_open_retry_count": 2,
     "bid_open_wait_seconds": 0.35,
     "abandon_guard_radius_pixels": 36,
-    "abandon_guard_red_ratio": 0.08
+    "abandon_guard_red_ratio": 0.08,
+    "abandon_button_region": {
+      "left": 690,
+      "top": 925,
+      "width": 350,
+      "height": 105
+    }
   },
   "window": {
     "title_keyword": "BidKing",
@@ -106,9 +112,17 @@
     "unknown_escape_cooldown_seconds": 2.0,
     "post_confirm_escape_block_seconds": 30.0,
     "confirm_after_map_select": false,
+    "map_select_confirm_wait_seconds": 0.6,
     "maps": {
       "1": {
         "name": "快递盲盒堆",
+        "confirm_after_select": true,
+        "confirm_wait_seconds": 0.4,
+        "confirm_point": {
+          "origin": "left_bottom",
+          "x": 680,
+          "y": 690
+        },
         "point": {
           "origin": "left_bottom",
           "x": 680,
@@ -170,6 +184,7 @@
     "selected_map": "2",
     "selected_runs": 5,
     "selected_risk": "avg_price",
+
     "custom_risk_factor": 0.0,
     "safe_guard_enabled": false,
     "safe_guard_max_increase_ratio": 0.5,
@@ -181,20 +196,21 @@
     "ahmad_gold_grid_bonus_unit_price": 10000,
     "ahmad_purple_grid_bonus_unit_price": 2000,
     "ahmad_warehouse_gold_value_table_enabled": true,
+    "ahmad_gold_grid_combo_max_items": 5,
     "ahmad_warehouse_map_ids": [
+      "1",
       "2"
     ],
     "ahmad_gold_grid_value_table": {
       "1": 15000,
-      "2": 27000,
-      "3": 43000,
-      "4": 35000,
-      "5": 39000,
-      "6": 50000,
+      "2": 22000,
+      "3": 40000,
+      "4": 34000,
+      "6": 45000,
       "8": 60000,
-      "9": 70000,
+      "9": 60000,
       "10": 68000,
-      "12": 85000,
+      "12": 80000,
       "15": 97382,
       "16": 199900
     },
@@ -211,7 +227,7 @@
     "tool_after_wait_seconds": 3.0,
     "click_pause_seconds": 0.12,
     "after_bid_confirm_wait_seconds": 1.0,
-    "transition_debounce_seconds": 8.0,
+    "transition_debounce_seconds": 2.0,
     "reward_continue_debounce_seconds": 1.0
   },
   "clicks": {
@@ -234,7 +250,8 @@
     },
     "bid_button": {
       "x": 862,
-      "y": 972
+      "y": 974,
+      "jitter_pixels": 0
     },
     "bid_input_box": {
       "x": 1046,
@@ -242,7 +259,8 @@
     },
     "bid_confirm": {
       "x": 1057,
-      "y": 988
+      "y": 988,
+      "jitter_pixels": 0
     },
     "end_reward_click": {
       "origin": "left_bottom",
@@ -271,8 +289,8 @@
     },
     "home_bid_button": {
       "origin": "left_bottom",
-      "x": 1634,
-      "y": 139
+      "x": 1652,
+      "y": 82
     },
     "reward_continue_button": {
       "origin": "left_bottom",

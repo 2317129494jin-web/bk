@@ -399,14 +399,36 @@ def has_end_prompt(text: str) -> bool:
 
 def has_auction_lobby(text: str) -> bool:
     tight = compact_text(text)
-    if "竞拍大厅" in tight:
+    has_lobby_title = (
+        "\u7ade\u62cd\u5927\u5385" in tight
+        or ("\u7ade\u62cd" in tight and "\u5927\u5385" in tight)
+        or "\u6607\u7530\u5bc4\u6108" in tight
+        or ("\u6607\u7530" in tight and "\u5bc4\u6108" in tight)
+    )
+    if not has_lobby_title:
+        return False
+    if "私人包厢" in tight or ("私人" in tight and "包厢" in tight):
         return True
-    return "竞拍" in tight and "大厅" in tight
+    map_markers = (
+        "快递盲盒堆",
+        "废弃仓库",
+        "深海沉船",
+        "沉船密封仓",
+        "航运集装箱",
+        "空置别墅",
+        "幽静别墅",
+        "隐秘拍卖会",
+    )
+    return any(marker in tight for marker in map_markers)
 
 
 def has_home_bid_button(text: str) -> bool:
     tight = compact_text(text)
-    return "竞拍" in tight
+    if "\u7ade\u62cd" in tight or "\u6607\u7530" in tight:
+        return True
+    if "开始行动" in tight:
+        return True
+    return "开始" in tight and "行动" in tight
 
 
 def has_reward_continue(text: str) -> bool:
@@ -822,7 +844,45 @@ def bid_confirm_target_looks_like_abandon(config: dict[str, Any]) -> bool:
     safety = config.get("safety", {})
     if not bool(safety.get("bid_confirm_abandon_guard", True)):
         return False
-    point = config.get("clicks", {}).get("bid_confirm")
+    return bid_target_looks_like_abandon(config, "bid_confirm")
+
+
+def bid_button_text_is_abandon(config: dict[str, Any]) -> bool:
+    region = config.get("safety", {}).get("abandon_button_region")
+    if not isinstance(region, dict):
+        return False
+    try:
+        frame, _info = capture_window_frame(config)
+        left, top, right, bottom = scaled_region_box(region, config, frame.width, frame.height)
+        if right <= left or bottom <= top:
+            return False
+        crop = frame.crop((left, top, right, bottom))
+        text = rapidocr_once(ImageOps.grayscale(crop).convert("RGB"))
+    except Exception as exc:
+        log(f"warn: abandon button OCR guard failed: {exc}")
+        return False
+    tight = compact_text(text)
+    if "弃权" in tight or "棄權" in tight or ("弃" in tight and "权" in tight):
+        log(f"bid open blocked: abandon button visible text={tight[:40]}")
+        return True
+    return False
+
+
+def bid_target_in_abandon_region(config: dict[str, Any], name: str, frame_width: int, frame_height: int) -> bool:
+    region = config.get("safety", {}).get("abandon_button_region")
+    point = config.get("clicks", {}).get(name)
+    if not isinstance(region, dict) or not isinstance(point, dict):
+        return False
+    x, y = scale_click_point_to_client(config, point, frame_width, frame_height)
+    left, top, right, bottom = scaled_region_box(region, config, frame_width, frame_height)
+    return left <= int(x) <= right and top <= int(y) <= bottom
+
+
+def bid_target_looks_like_abandon(config: dict[str, Any], name: str) -> bool:
+    safety = config.get("safety", {})
+    if not bool(safety.get("bid_confirm_abandon_guard", True)):
+        return False
+    point = config.get("clicks", {}).get(name)
     if not point:
         return False
     try:
@@ -830,6 +890,9 @@ def bid_confirm_target_looks_like_abandon(config: dict[str, Any]) -> bool:
     except Exception as exc:
         log(f"warn: abandon guard capture failed: {exc}")
         return False
+    if bid_target_in_abandon_region(config, name, frame.width, frame.height):
+        log(f"{name} blocked: target is inside configured abandon button region")
+        return True
     x, y = scale_click_point_to_client(config, point, frame.width, frame.height)
     radius = max(8, parse_int_config(safety.get("abandon_guard_radius_pixels"), 36))
     left = max(0, int(x) - radius)
@@ -849,7 +912,7 @@ def bid_confirm_target_looks_like_abandon(config: dict[str, Any]) -> bool:
     ratio = float(danger) / float(total or 1)
     threshold = max(0.0, parse_float_config(safety.get("abandon_guard_red_ratio"), 0.08))
     if ratio >= threshold:
-        log(f"bid confirm blocked: target looks like abandon button red_ratio={ratio:.3f} threshold={threshold:.3f}")
+        log(f"{name} blocked: target looks like abandon button red_ratio={ratio:.3f} threshold={threshold:.3f}")
         return True
     return False
 
@@ -932,6 +995,9 @@ def input_bid(config: dict[str, Any], price: int) -> bool:
     for attempt in range(1, retry_count + 1):
         if retry_count > 1:
             log(f"bid attempt {attempt}/{retry_count}")
+        if bid_button_text_is_abandon(config):
+            log("bid open skipped: current round already appears submitted")
+            return False
         click_point(config, "bid_button")
         sleep_interruptible(open_wait)
         click_point(config, "bid_input_box")
@@ -1012,9 +1078,19 @@ def run_map_selection_transition(config: dict[str, Any], selected_map: str) -> f
         pyautogui.click(sx, sy)
     sleep_interruptible(float(config.get("timing", {}).get("click_pause_seconds", 0.12)))
     confirm_at = time.monotonic()
-    if bool(automation.get("confirm_after_map_select", True)):
-        sleep_interruptible(2.0)
-        click_point(config, "post_continue_confirm")
+    confirm_after_select = bool(item.get("confirm_after_select", automation.get("confirm_after_map_select", True)))
+    if confirm_after_select:
+        wait_seconds = max(0.0, parse_float_config(item.get("confirm_wait_seconds"), automation.get("map_select_confirm_wait_seconds", 0.6)))
+        sleep_interruptible(wait_seconds)
+        confirm_point = item.get("confirm_point")
+        if isinstance(confirm_point, dict):
+            cx, cy = client_to_screen(config, confirm_point)
+            log(f"click map confirm point: screen={cx},{cy}")
+            if not bool(config.get("safety", {}).get("dry_run", False)):
+                pyautogui.click(cx, cy)
+            sleep_interruptible(float(config.get("timing", {}).get("click_pause_seconds", 0.12)))
+        else:
+            click_point(config, "post_continue_confirm")
         confirm_at = time.monotonic()
     log("map selection transition complete; waiting for round OCR")
     return confirm_at
@@ -1214,7 +1290,7 @@ def is_ahmad_warehouse_gold_table_enabled(config: dict[str, Any]) -> bool:
 def is_ahmad_warehouse_map(config: dict[str, Any]) -> bool:
     automation = config.get("automation", {})
     selected_map = str(automation.get("selected_map") or automation.get("default_map") or "")
-    enabled_maps = {str(item) for item in automation.get("ahmad_warehouse_map_ids", ["2"])}
+    enabled_maps = {str(item) for item in automation.get("ahmad_warehouse_map_ids", ["1", "2"])}
     return selected_map in enabled_maps
 
 
@@ -1242,6 +1318,53 @@ def ahmad_gold_value_table(config: dict[str, Any]) -> dict[int, int]:
     return result
 
 
+def ahmad_gold_grid_combo_max_items(config: dict[str, Any]) -> int:
+    automation = config.get("automation", {})
+    return max(1, parse_int_config(automation.get("ahmad_gold_grid_combo_max_items"), 5))
+
+
+def ahmad_gold_grid_value_combinations(
+    table: dict[int, int],
+    total_grid: int,
+    max_items: int,
+) -> list[tuple[tuple[int, ...], int]]:
+    if total_grid <= 0 or max_items <= 0:
+        return []
+    sizes = sorted((grid for grid in table if grid > 0 and grid <= total_grid), reverse=True)
+    if not sizes:
+        return []
+
+    combinations: list[tuple[tuple[int, ...], int]] = []
+
+    def walk(remaining: int, start_index: int, parts: list[int]) -> None:
+        if remaining == 0:
+            combinations.append((tuple(parts), sum(table[part] for part in parts)))
+            return
+        if len(parts) >= max_items:
+            return
+        for index in range(start_index, len(sizes)):
+            size = sizes[index]
+            if size > remaining:
+                continue
+            parts.append(size)
+            walk(remaining - size, index, parts)
+            parts.pop()
+
+    walk(total_grid, 0, [])
+    return combinations
+
+
+def best_ahmad_gold_grid_value_combo(
+    table: dict[int, int],
+    total_grid: int,
+    max_items: int,
+) -> tuple[tuple[int, ...], int] | None:
+    combinations = ahmad_gold_grid_value_combinations(table, total_grid, max_items)
+    if not combinations:
+        return None
+    return min(combinations, key=lambda item: (len(item[0]), item[1], item[0]))
+
+
 def ahmad_color_grid_bonus_value(
     config: dict[str, Any],
     color: str,
@@ -1253,20 +1376,28 @@ def ahmad_color_grid_bonus_value(
         return choose_rounding(float(min_grid) * float(unit_price), "floor_int"), "unit"
 
     table = ahmad_gold_value_table(config)
-    table_candidates: list[tuple[int, int]] = []
+    max_items = ahmad_gold_grid_combo_max_items(config)
+    table_candidates: list[tuple[int, tuple[int, ...], int]] = []
     for grid_value in color_grid_candidates_from_result(result, color):
         grid = int(round(float(grid_value)))
         if abs(float(grid_value) - grid) > 1e-9:
             continue
-        if grid in table:
-            table_candidates.append((grid, int(table[grid])))
+        combo = best_ahmad_gold_grid_value_combo(table, grid, max_items)
+        if combo is not None:
+            parts, price = combo
+            table_candidates.append((grid, parts, int(price)))
     if table_candidates:
-        grid, price = min(table_candidates, key=lambda item: item[1])
-        return int(price), f"warehouse_table_grid={grid}"
+        grid, parts, price = min(table_candidates, key=lambda item: (len(item[1]), item[2], item[0], item[1]))
+        combo_label = "+".join(str(part) for part in parts)
+        return int(price), f"warehouse_table_combo_grid={grid} combo={combo_label} items={len(parts)}"
     direct_grid = int(round(float(min_grid)))
-    if abs(float(min_grid) - direct_grid) <= 1e-9 and direct_grid in table:
-        return int(table[direct_grid]), f"warehouse_table_grid={direct_grid}"
-    return choose_rounding(float(min_grid) * float(unit_price), "floor_int"), "unit_fallback"
+    if abs(float(min_grid) - direct_grid) <= 1e-9:
+        combo = best_ahmad_gold_grid_value_combo(table, direct_grid, max_items)
+        if combo is not None:
+            parts, price = combo
+            combo_label = "+".join(str(part) for part in parts)
+            return int(price), f"warehouse_table_combo_grid={direct_grid} combo={combo_label} items={len(parts)}"
+    return 0, f"warehouse_table_no_combo_grid={direct_grid}"
 
 
 def cache_ahmad_color_grid_bonus(
@@ -1307,9 +1438,7 @@ def ahmad_gold_grid_bonus_multiplier(config: dict[str, Any], round_no: int, star
         return 1.0, "fixed_100pct"
     relative_round = max(0, int(round_no) - int(start_round))
     if is_ahmad_warehouse_round_schedule_enabled(config):
-        if relative_round <= 0:
-            return 0.8, "scaled_80pct"
-        return 0.8, "scaled_80pct_final_schedule"
+        return 1.0, "fixed_100pct_total_schedule"
     if relative_round <= 0:
         return 0.8, "scaled_80pct"
     if relative_round == 1:
@@ -1343,16 +1472,18 @@ def compute_ahmad_gold_grid_bonus(
         value_source = None
         min_grid: float | None = None
         bonus = 0
+        used_current_signal = False
         if has_ahmad_color_grid_signal(advisor_input, color):
             min_grid = min_color_grid_from_result(result, color)
             if min_grid is None:
                 min_grid = direct_color_grid_from_advisor_input(advisor_input, color)
             if min_grid is not None and min_grid > 0:
+                used_current_signal = True
                 bonus = cache_ahmad_color_grid_bonus(config, color, min_grid, unit_price, result)
                 _, _, value_source = cached_ahmad_color_grid_bonus(config, color)
                 if bonus > 0:
                     source = "ocr"
-        if bonus <= 0:
+        if bonus <= 0 and not used_current_signal:
             bonus, min_grid, value_source = cached_ahmad_color_grid_bonus(config, color)
         if bonus > 0:
             color_parts[color] = {
@@ -1396,8 +1527,10 @@ def compute_ahmad_gold_grid_bonus(
 
 def ahmad_warehouse_round_schedule_multiplier(round_no: int) -> tuple[float | None, str | None]:
     round_index = int(round_no)
+    if round_index == 3:
+        return 0.78, "round3=total_final*0.78"
     if round_index == 4:
-        return 1.1 * 1.1, "round4=round3_final*1.1*1.1"
+        return 1.243, "round4=round3_final*1.1*1.13"
     if round_index == 5:
         return 1.03, "round5=round4_final*1.03"
     return None, None
@@ -1415,6 +1548,18 @@ def apply_ahmad_warehouse_round_schedule(
     multiplier, label = ahmad_warehouse_round_schedule_multiplier(round_no)
     if multiplier is None or label is None:
         return int(final_price), None
+
+    if int(round_no) == 3:
+        scheduled_price = choose_rounding(float(final_price) * float(multiplier), rounding)
+        if scheduled_price <= 0:
+            return int(final_price), f"ahmad_warehouse_round_schedule {label} skipped: scheduled_price={scheduled_price}"
+        return (
+            int(scheduled_price),
+            (
+                f"ahmad_warehouse_round_schedule {label} "
+                f"computed_input={int(final_price)} multiplier={multiplier:.3f} -> {scheduled_price}"
+            ),
+        )
 
     pricing = config.get("pricing", {})
     previous_price_raw = pricing.get("last_submitted_price")
@@ -1652,8 +1797,8 @@ def compute_bid_price(
     )
     if bonus_applied:
         price += bonus_price
-    final_price, low_price_reason = apply_observed_low_price_floor(result, price, rounding)
-    final_price, round_schedule_reason = apply_ahmad_warehouse_round_schedule(config, round_no, final_price, rounding)
+    final_price, round_schedule_reason = apply_ahmad_warehouse_round_schedule(config, round_no, price, rounding)
+    final_price, low_price_reason = apply_observed_low_price_floor(result, final_price, rounding)
     sticky_reason = None
     if should_apply_sticky_increment(config):
         final_price, sticky_reason = apply_sticky_increment(config, final_price)
@@ -1707,7 +1852,6 @@ def wait_with_observation(
         observation = observe_state(config, config_path, f"{message.replace(' ', '_')}_wait")
         if observation.end_prompt:
             raise EndPromptDetected(message)
-
 
 def handle_round(
     config: dict[str, Any],

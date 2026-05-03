@@ -197,12 +197,12 @@ class BidKingApp:
         row7 = ttk.Frame(extra_box)
         row7.pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(row7, text="艾哈迈德金/紫均加价", variable=self.ahmad_gold_grid_bonus_enabled_var).pack(side="left")
-        ttk.Label(row7, text="仅角色为艾哈迈德时生效：第2轮识别橙/金均格，第3轮识别紫均格；仓库金按表估值，紫按每格2000").pack(side="left", padx=(12, 0))
+        ttk.Label(row7, text="仅角色为艾哈迈德时生效：第2轮识别橙/金均格，第3轮识别紫均格；仓库/快递站金按表估值，紫按每格2000").pack(side="left", padx=(12, 0))
 
         row8 = ttk.Frame(extra_box)
         row8.pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(row8, text="艾哈迈德金均递增方案", variable=self.ahmad_gold_grid_scaled_scheme_enabled_var).pack(side="left")
-        ttk.Label(row8, text="开启后：第3轮加80%(金+紫)，第4轮=第3轮最终价x1.1x1.1，第5轮=第4轮最终价x1.03；关闭则按旧方案直接加100%").pack(side="left", padx=(12, 0))
+        ttk.Label(row8, text="开启后：第3轮=总价值78%(含金紫)，第4轮=第3轮最终价x1.1x1.13，第5轮=第4轮最终价x1.03；关闭则按旧方案直接加100%").pack(side="left", padx=(12, 0))
 
         tip_box = ttk.LabelFrame(main, text="7. 道具提示", padding=10)
         tip_box.pack(fill="x", pady=(10, 0))
